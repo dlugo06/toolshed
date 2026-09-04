@@ -28,6 +28,7 @@
 | `/security-review [PR#]` | security-reviewer | `.dev/SECURITY_REVIEW.md` or PR comment |
 | `/qa-hunt` | qa-bug-hunter | `.dev/QA_REPORT.md` |
 | `/e2e-test <phase\|task_id>` | e2e-tester | `.dev/E2E_REPORT_<id>.md` |
+| `/check-impact` | behavioral-impact-checker | `.dev/BEHAVIORAL_IMPACT_<branch>.md` |
 | `/plan-tests` | test-scenario-planner | `.dev/test-plan-<branch>.md` |
 | `/review-tests` | test-quality-reviewer | `.dev/test-review-<branch>.md` |
 | `/spec-check [path]` | spec-checker | `.dev/SPEC_CHECK_REPORT_<date>.md` |

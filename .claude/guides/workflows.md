@@ -6,11 +6,12 @@ Two modes depending on whether you're working interactively or running autonomou
 
 1. **Brainstorm**: `superpowers:brainstorming` — explore intent, requirements, design
 2. **Plan**: `superpowers:writing-plans` — produce a step-by-step plan with TDD steps
-3. **Plan Tests**: `/plan-tests` — generate and approve test scenario map for all tasks
-4. **Execute**: `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans`
+3. **Check Impact**: `/check-impact` — verify the plan doesn't silently regress behavior from prior specs (run before `/plan-tests`)
+4. **Plan Tests**: `/plan-tests` — generate and approve test scenario map for all tasks
+5. **Execute**: `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans`
    - Each task: implementer subagent → spec reviewer → code quality reviewer
-5. **Review Tests**: `/review-tests` — audit test quality against scenario map (must pass before ship)
-6. **Ship**: `superpowers:finishing-a-development-branch` → `/ship`
+6. **Review Tests**: `/review-tests` — audit test quality against scenario map (must pass before ship)
+7. **Ship**: `superpowers:finishing-a-development-branch` → `/ship`
 
 ## Autonomous (Ralph — unattended batch work)
 
