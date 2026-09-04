@@ -87,6 +87,51 @@ Only flag missing edge cases that are **plausible** — don't generate noise for
 
 ---
 
+## Step 5b — Audit: Cross-Layer Data Flow
+
+**This step is mandatory.** Most production bugs slip through because each layer is tested in isolation with mocked inputs that don't match real data flow. A test suite can have 100% coverage and still miss bugs that only manifest when real data crosses layer boundaries.
+
+### 5b.1: Identify the data pipelines
+
+Read the changed source files and trace each distinct input category from system entry (request received, file received, API call) through every layer to final output (formatted message, database state, API response). Write down the layers.
+
+### 5b.2: Check for "filter-then-forget" patterns (BLOCKER if found)
+
+For every test that asserts an input is **filtered, dropped, ignored, or skipped**:
+
+1. Read the test name and assertion. Does the test assert that the drop is correct?
+2. Ask: "According to the current spec/design, SHOULD this input be dropped?" Read the relevant design spec or CLAUDE.md to verify.
+3. If the input **should** be dropped: fine. Note it as verified.
+4. If the input **should be routed to an alternative path** (e.g., an unsupported record type → a fallback handler): flag BLOCKER — the test is enshrining a bug as correct behavior.
+5. If you can't determine intent: flag WARNING — "test asserts drop behavior but no companion test verifies the alternative path for similar inputs."
+
+**Red flags for test names**: "ignored", "still_ignored", "skipped", "filtered", "returns_none", "returns_empty" — these tests deserve extra scrutiny. They may be correct, but each one should have a documented justification for WHY the input is dropped rather than processed differently.
+
+### 5b.3: Check for "mock-past-the-filter" patterns (BLOCKER if found)
+
+For each test that claims to test a cross-layer behavior:
+
+1. Check what's mocked. Does the mock bypass the exact filtering/routing layer that the test is supposed to validate?
+2. If a test claims to verify that "unsupported records are routed to the fallback handler" but mocks the classification layer (which is where the filtering actually happens), the test is NOT testing what it claims.
+3. Flag: "Test mocks out [layer X] but the behavior under test depends on [layer X]'s real filtering logic."
+
+### 5b.4: Check for "output field never set" patterns (BLOCKER if found)
+
+For output formatters or display logic:
+
+1. Find every conditional that controls what appears in output (e.g., `if item.error:`, `if item.url:`, `if item.flag:`)
+2. Trace upstream: does every code path that reaches the formatter actually set the fields that the conditional checks?
+3. If a formatter shows a field only when `error` is set, but the upstream code that creates the item never sets `error` — flag BLOCKER: "Formatter condition `item.error` is never set by the fallback path, so those items will never display that field."
+
+### 5b.5: Check for end-to-end test coverage
+
+For each distinct input category that the changed code handles:
+
+1. Is there at least one test that exercises the full path from entry point to final output WITHOUT mocking intermediate layers?
+2. If all tests mock the layer above or below, flag WARNING: "No end-to-end test exists for [input category]. All tests mock intermediate layers."
+
+---
+
 ## Step 6 — Audit: Test Independence
 
 Scan for:
@@ -197,3 +242,5 @@ Fix blockers before shipping.
 - **Don't flag impossible inputs as missing edge cases.** If a function only receives validated input from an internal caller, don't demand validation tests for arbitrary strings.
 - **Don't praise good tests.** If a test is fine, say nothing about it. Only report problems.
 - **Don't hallucinate test files.** If you haven't read a file, you can't audit it. Stick to what you've actually read.
+- **Don't trust test names.** A test named `test_unknown_input_still_ignored` that asserts `len(result) == 0` may be enshrining a bug. Verify against the design spec that the behavior is actually intended.
+- **Don't assume mocked layers are tested elsewhere.** If test A mocks layer X and test B also mocks layer X, nobody is testing layer X's real behavior in the pipeline. Flag this gap.

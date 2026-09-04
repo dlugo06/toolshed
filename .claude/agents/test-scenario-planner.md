@@ -126,6 +126,56 @@ Review the scenario plan and approve before starting implementation.
 
 ---
 
+## Step 6 — Cross-Layer Data Flow Scenarios
+
+**This step is mandatory.** Most production bugs are not caught by unit tests because each layer is tested in isolation with mocked inputs that don't match real data flow. After generating per-task scenarios, you MUST analyze the full data path and generate cross-layer scenarios.
+
+### Procedure
+
+1. **Trace the data path.** For each feature or behavior in the plan, trace the full pipeline from entry point (request received, file received) through every layer to final output (formatted message, database record). Write down each layer and the data it passes to the next.
+
+2. **Identify filtering/transformation boundaries.** At every point where data is filtered, dropped, transformed, or routed, ask:
+   - What categories of input pass through this filter? What gets dropped?
+   - Does the next layer expect to receive ALL categories, or only filtered ones?
+   - If an item is intentionally dropped, is there a test that verifies the drop AND a test that verifies what happens to items that SHOULD pass through?
+
+3. **Generate end-to-end scenarios.** For each distinct input category (e.g., valid record, unsupported record type, partial record, malformed input):
+   - Write a scenario that traces that input from system entry to final output
+   - Assert on the FINAL output (the formatted message, the database state), not just the intermediate processing result
+   - If the input passes through multiple layers, do NOT mock intermediate layers — the scenario must exercise the real filtering/routing logic
+
+4. **Generate "negative path completeness" scenarios.** For every test that asserts an input is dropped/filtered/ignored:
+   - Write a companion scenario that asks: "What SHOULD the system do with this input if NOT dropping it?" If the answer is "nothing — it should be dropped," that's fine. If the answer is "it should be routed to an alternative path," then write a scenario testing that alternative path END-TO-END.
+
+### Format
+
+Add a new section to the test plan after all per-task scenarios:
+
+```markdown
+## Cross-Layer Data Flow Scenarios
+
+### Pipeline: <entry point> → <layer 1> → <layer 2> → <output>
+
+**Critical:**
+- Given <input that traverses all layers> / When processed end-to-end / Then final output contains <concrete expected content>
+- Given <input that should be routed to alternative path> / When processed end-to-end / Then alternative output contains <concrete expected content>
+- Given <input that is intentionally dropped> / When processed end-to-end / Then <specific drop behavior with log/message>
+
+**Boundary:**
+- Given <input at the edge of filter criteria> / When processed / Then <correct routing decision>
+```
+
+### Red Flags to Call Out
+
+If you notice any of these patterns in existing code while generating scenarios, flag them explicitly in the plan:
+
+- A filter that drops inputs with no corresponding "what happens to dropped inputs" test
+- A test that mocks out the exact layer it claims to be testing (e.g., testing document processing by mocking the parser)
+- A test name containing "ignored" or "skipped" or "filtered" that asserts emptiness without justifying WHY the input should be dropped
+- An output formatter that conditionally includes/excludes content based on a field that upstream code never sets
+
+---
+
 ## Anti-Patterns
 
 - **Don't write test code.** Scenarios only. The implementer writes the code.
@@ -133,3 +183,4 @@ Review the scenario plan and approve before starting implementation.
 - **Don't skip component types you haven't seen before.** Use judgment — every function fits somewhere.
 - **Don't generate scenarios for trivial getters/setters.** Focus on logic, transformations, and integration points.
 - **Don't limit yourself to the guide checklists.** They're starting points. If you see a project-specific edge case (e.g., Decimal falsy behavior, framework-specific testing quirks), add it.
+- **Don't only test layers in isolation.** If every scenario mocks the layer above or below, you're testing the mock, not the system. At least 20% of Critical scenarios must be end-to-end across 2+ layers.

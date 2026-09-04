@@ -4,8 +4,8 @@ A project skeleton for Claude Code with TDD workflows, autonomous development (R
 
 ## What's Included
 
-- **10 specialist agents** — PR reviewer, security reviewer, DBA, QA bug hunter, code architect, spec checker, test quality reviewer, test scenario planner, Ralph initializer, E2E tester
-- **13 slash commands** — /ship, /process-review, /run-tests, /debug-workflow, /architecture-review, /db-review, /security-review, /qa-hunt, /e2e-test, /initialize-phase, /plan-tests, /review-tests, /spec-check
+- **11 specialist agents** — PR reviewer, security reviewer, DBA, QA bug hunter, code architect, spec checker, test quality reviewer, test scenario planner, behavioral impact checker, Ralph initializer, E2E tester
+- **14 slash commands** — /ship, /process-review, /run-tests, /debug-workflow, /architecture-review, /db-review, /security-review, /qa-hunt, /e2e-test, /initialize-phase, /check-impact, /plan-tests, /review-tests, /spec-check
 - **Ralph autonomous loop** — generator/evaluator architecture for unattended TDD-driven development
 - **PRD tracking** — JSON-based phase PRDs with progress files and deferred discussions
 - **Hookify guardrails** — test scenario and test review gates
@@ -28,8 +28,8 @@ A project skeleton for Claude Code with TDD workflows, autonomous development (R
 ```
 ├── CLAUDE.md                    # Thin root — references guides
 ├── .claude/
-│   ├── agents/                  # 10 specialist review agents
-│   ├── commands/                # 13 slash commands
+│   ├── agents/                  # 11 specialist review agents
+│   ├── commands/                # 14 slash commands
 │   ├── guides/                  # Modular documentation
 │   └── hookify.*.local.md      # Safety guardrails
 ├── docs/
@@ -44,7 +44,7 @@ A project skeleton for Claude Code with TDD workflows, autonomous development (R
 
 ### Interactive (Superpowers)
 
-Brainstorm → Plan → Plan Tests → Execute (subagent-driven) → Review Tests → Ship
+Brainstorm → Plan → Check Impact → Plan Tests → Execute (subagent-driven) → Review Tests → Ship
 
 ### Autonomous (Ralph)
 

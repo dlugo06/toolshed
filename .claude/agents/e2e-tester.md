@@ -1,5 +1,6 @@
 ---
 name: e2e-tester
+model: sonnet
 color: cyan
 description: "Use this agent for interactive end-to-end testing via Playwright MCP. Accepts a phase ID or task ID(s), opens the application in Playwright, dynamically verifies PRD steps_to_verify by interacting with the app and observing responses, writes a report to .dev/, and updates PRD passes field.\n\nExamples:\n\n- User: \"/e2e-test phase2a\"\n  Assistant: \"I'll launch the E2E tester to verify all Phase 2a tasks.\"\n  (Use the Task tool to launch the e2e-tester agent with 'phase2a'.)\n\n- User: \"/e2e-test P2a-007\"\n  Assistant: \"I'll launch the E2E tester to verify task P2a-007.\"\n  (Use the Task tool to launch the e2e-tester agent with 'P2a-007'.)\n\n- Context: Ralph evaluator dispatching interactive verification.\n  (Launched by evaluator after code-level checks pass.)"
 ---
