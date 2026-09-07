@@ -78,7 +78,7 @@ git diff master --name-only
 ```
 
 **Auto-upgrade to `--full`** — without being asked — if the diff touches any of:
-- A dependency manifest: `requirements*.txt`, `pyproject.toml`, `package.json`, `package-lock.json`, `go.mod`, `Cargo.toml`
+- Dependency declarations in a manifest: `requirements*.txt`, the `dependencies`/`optional-dependencies` sections of `pyproject.toml`, `dependencies`/`devDependencies` in `package.json`, `package-lock.json`, `go.mod`, `Cargo.toml`. Tool configuration in the same files (pytest markers, ruff settings, scripts) does not count.
 - `.env.example`
 - Anything under `migrations/`
 - The diff adds a new HTTP client/egress call (matches `httpx|requests|fetch\(|axios`) or a new webhook/route handler

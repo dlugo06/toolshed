@@ -63,7 +63,7 @@ Write your verdict to `.dev/ralph-evaluation.md`:
 ```markdown
 ## Evaluation: {task_id} — {task_title}
 
-**Verdict: PASS | FAIL**
+**Verdict: PASS**
 
 ### Steps to Verify
 - [ ] {step 1} — PASS/FAIL — {evidence}
@@ -82,6 +82,8 @@ Write your verdict to `.dev/ralph-evaluation.md`:
 {If PASS: "Ready for /dev-kit:ship"}
 {If FAIL: "Needs fix: {specific items}"}
 ```
+
+Write the verdict line as exactly one of `**Verdict: PASS**` or `**Verdict: FAIL**`. Never put both words on it: `ralph-once.sh` greps that line literally and reads a line containing both as a PASS, so an unedited template silently passes.
 
 ## 7. If FAIL — Do NOT Fix
 
