@@ -1,0 +1,11 @@
+{
+  "name": "mind",
+  "version": "0.0.1",
+  "description": "Owner preference and decision store injected at session start. Placeholder; not yet built.",
+  "author": {
+    "name": "dlugo06",
+    "url": "https://github.com/dlugo06"
+  },
+  "license": "MIT",
+  "keywords": ["preferences", "memory", "placeholder"]
+}

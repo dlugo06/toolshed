@@ -1,0 +1,11 @@
+{
+  "name": "orchestrator",
+  "version": "0.1.0",
+  "description": "Cross-project work router. Reads every project's PRD items, assigns each a pipeline stage, runs the single next transition, and stops at human gates.",
+  "author": {
+    "name": "dlugo06",
+    "url": "https://github.com/dlugo06"
+  },
+  "license": "MIT",
+  "keywords": ["orchestration", "workflow", "prd", "pipeline", "multi-project"]
+}
