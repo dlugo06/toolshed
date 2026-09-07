@@ -145,6 +145,9 @@ echo "--- Evaluator ---"
 echo "Verifying task against steps_to_verify with fresh context..."
 echo ""
 
+# A stale verdict from a previous run must never be read as this run's verdict.
+rm -f .dev/ralph-evaluation.md
+
 claude \
     --permission-mode acceptEdits \
     "@$EVALUATOR_PROMPT @$PRD_FILE @$PROGRESS_FILE \
@@ -153,26 +156,42 @@ You are the evaluator. Review the most recent commit and verify it against the t
 
 EVALUATOR_EXIT=$?
 
-# Check evaluator verdict
-if [ -f ".dev/ralph-evaluation.md" ]; then
-    if grep -q "Verdict: FAIL" .dev/ralph-evaluation.md; then
-        echo ""
-        echo "=== Evaluator: FAIL ==="
-        echo "Issues found. Review .dev/ralph-evaluation.md"
-        echo "Run ./ralph-once.sh again to fix, or review manually."
-        exit 1
-    elif grep -q "Verdict: PASS" .dev/ralph-evaluation.md; then
-        echo ""
-        echo "=== Evaluator: PASS ==="
-
-        # Steps requiring manual verification don't block PASS — surface them for the owner.
-        if grep -q "MANUAL VERIFICATION" .dev/ralph-evaluation.md; then
-            echo ""
-            echo "--- Manual verification required (owner, post-deploy) ---"
-            grep "MANUAL VERIFICATION" .dev/ralph-evaluation.md
-            echo ""
-        fi
-
-        echo "Ready for /dev-kit:ship"
-    fi
+if [ "$EVALUATOR_EXIT" -ne 0 ]; then
+    echo "Evaluator exited with code $EVALUATOR_EXIT. Treating as FAIL."
+    exit "$EVALUATOR_EXIT"
 fi
+
+# Check evaluator verdict. Anything other than an explicit PASS is a FAIL:
+# a missing file, a placeholder left in the template, or both words on one line.
+if [ ! -f ".dev/ralph-evaluation.md" ]; then
+    echo ""
+    echo "=== Evaluator: FAIL (no .dev/ralph-evaluation.md written) ==="
+    exit 1
+fi
+
+if grep -q "Verdict: FAIL" .dev/ralph-evaluation.md; then
+    echo ""
+    echo "=== Evaluator: FAIL ==="
+    echo "Issues found. Review .dev/ralph-evaluation.md"
+    echo "Run ./ralph-once.sh again to fix, or review manually."
+    exit 1
+fi
+
+if ! grep -q "Verdict: PASS" .dev/ralph-evaluation.md; then
+    echo ""
+    echo "=== Evaluator: FAIL (no explicit Verdict: PASS line) ==="
+    exit 1
+fi
+
+echo ""
+echo "=== Evaluator: PASS ==="
+
+# Steps requiring manual verification don't block PASS — surface them for the owner.
+if grep -q "MANUAL VERIFICATION" .dev/ralph-evaluation.md; then
+    echo ""
+    echo "--- Manual verification required (owner, post-deploy) ---"
+    grep "MANUAL VERIFICATION" .dev/ralph-evaluation.md
+    echo ""
+fi
+
+echo "Ready for /dev-kit:ship"
