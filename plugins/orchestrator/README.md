@@ -28,7 +28,9 @@ The SessionStart hook prints what is in flight so a fresh session starts with th
 
 ## State
 
-State lives on the PRD items: `stage`, `branch`, `pr`, `disposition`, `blocked_reason`, `updated`. `passes` belongs to the owner. The stage machine, selection rules, ship tiers and guardrails are in `reference/orchestrator.md`.
+State lives on the PRD items: `stage`, `tier`, `agents`, `branch`, `pr`, `disposition`, `blocked_reason`, `updated`. `passes` belongs to the owner. The stage machine, pipeline tiers (`fix`, `standard`, `full`, each with a subagent cap and a model table), selection rules, ship tiers and guardrails are in `reference/orchestrator.md`.
+
+The orchestrator decides which plugin executes each stage. Inside a run it invokes only what the stage table names: `superpowers` for brainstorming and plan writing, `dev-kit` for the checks and the ship pipeline, and its own implementer and reviewer dispatches for the rest. Per-task review loops, separate spec checkers, evaluators and multi-agent simplify passes are reserved for the `full` tier; a `fix` item is capped at eight subagents, two of them on Opus besides the three PR reviewers.
 
 ## Item shape
 

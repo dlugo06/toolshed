@@ -115,7 +115,9 @@ Present a summary table to the user BEFORE taking action:
 
 ### 5. Apply Fixes
 
-After user approval, for each comment classified as "fix":
+After user approval, write the approved "fix" rows to a brief file and dispatch **one** implementer subagent (`model: "sonnet"`) with that brief. It applies every fix, runs the covering tests, and commits. Do not dispatch one agent per finding and do not dispatch a re-review agent; the PR reviewers already ran, and the next review of this diff is the human's at merge.
+
+For each comment classified as "fix", the brief states:
 - Make the code change
 - Keep changes minimal and scoped to what the reviewer requested
 - Do not refactor surrounding code
@@ -158,7 +160,8 @@ PR #XX review comments processed:
 
 - **Before starting**, invoke `superpowers:receiving-code-review` -- this enforces technical rigor when evaluating feedback, preventing blind agreement or blind rejection
 - **NEVER auto-approve** -- always present the decision table and STOP until the user explicitly approves
-- **Never silently skip a comment** -- every unresolved thread gets a reply
+- **Never silently skip a comment** -- every unresolved thread gets a reply; do not resolve threads (replies are enough, resolving is API noise)
+- **One fix subagent, no re-review subagent** -- the fix wave is a single Sonnet dispatch; verification is the test suite plus the human merge
 - **Always wait for user approval** of the decision table before making changes
 - **Always run `pytest` before committing** -- this project enforces TDD strictly
 - **Use conventional commits** -- prefix with `fix:`, not freeform messages

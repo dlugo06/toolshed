@@ -48,20 +48,21 @@ Everything else — the two `hookify.*.local.md` guardrails (test scenario remin
 
 ## Workflow
 
-### Interactive (Superpowers — you're in a session)
+### Interactive (you're in a session)
 
-1. **Brainstorm**: `superpowers:brainstorming` — explore intent, requirements, design
-2. **Plan**: `superpowers:writing-plans` — produce a step-by-step plan with TDD steps
-3. **Check Impact**: `/dev-kit:check-impact` — verify the plan doesn't silently regress behavior from prior specs (run before plan-tests)
-4. **Plan Tests**: `/dev-kit:plan-tests` — generate and approve a test scenario map for all tasks
-5. **Execute**: `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans`
-   - Each task: implementer subagent → spec reviewer → code quality reviewer
-6. **Ship**: `/dev-kit:ship` — tier (standard, `--full`, `--light`) is chosen by the caller: the `orchestrator` plugin decides it as part of the normal workflow, or a human can pass the flag directly. `/dev-kit:ship` also auto-upgrades to `--full` on its own when the diff touches a dependency manifest, `.env.example`, migrations, or adds new HTTP egress/webhook code.
-7. **Process Review**: `/dev-kit:process-review <PR#>` — read comments, fix or reject with reasoning, reply, resolve
+When the `orchestrator` plugin is installed it drives this sequence and decides, per item, which plugin runs each step and how many subagents the item may use (see `plugins/orchestrator/reference/orchestrator.md`, §Pipeline tiers). Without it, run the steps by hand:
+
+1. **Spec**: `superpowers:brainstorming` when the cause or design is unknown, then `superpowers:writing-plans`. A bug with a trace goes straight to a spec.
+2. **Check Impact**: `/dev-kit:check-impact` — verify the plan doesn't silently regress behavior from prior specs (run before plan-tests)
+3. **Plan Tests**: `/dev-kit:plan-tests` — generate and approve a test scenario map for all tasks
+4. **Implement**: one implementer subagent per batch of related tasks, briefed from the plan. Per-task reviewer loops (`superpowers:subagent-driven-development`) are for foundational work only; they roughly triple the subagent count for the same diff.
+5. **Review**: one whole-branch reviewer with the spec, plan and verification steps, then one fix dispatch. `/dev-kit:review-tests` when tests look thin.
+6. **Ship**: `/dev-kit:ship` — tier (standard, `--full`, `--light`) is chosen by the caller; pass `--reviewed` when step 5 already ran so ship skips simplify and spec-check. `/dev-kit:ship` also auto-upgrades to `--full` on its own when the diff touches a dependency manifest, `.env.example`, migrations, or adds new HTTP egress/webhook code.
+7. **Process Review**: `/dev-kit:process-review <PR#>` — read every source (threads, review bodies, local reviewer reports), fix or reject with reasoning, reply; one fix subagent, no re-review subagent.
 8. **Merge** — human gate. No agent merges a PR.
 9. **Manual verification** — the owner verifies the change in production after deploy.
 
-`/dev-kit:review-tests` is available at any point before shipping to audit test quality against the scenario plan, but it is **optional**, not a required gate.
+Model rule: the whole-branch reviewer and the ship reviewers run on Opus; everything else runs on Sonnet.
 
 ### Autonomous (Ralph — unattended batch work)
 
