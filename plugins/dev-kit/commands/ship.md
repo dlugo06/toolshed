@@ -5,15 +5,17 @@ description: Ship the current branch: simplify, test, commit, push, create PR, a
 
 Ship the current branch: simplify, test, commit, push, create PR, and launch reviewers.
 
-Arguments: `[--full|--light] [PR title override]` — e.g. `/dev-kit:ship --full`, `/dev-kit:ship fix: handle edge case`. The tier flag is normally chosen by the caller (the `orchestrator` plugin decides it as part of the normal workflow; a human can also pass it directly). With no flag, run the **standard** tier below, unless the auto-upgrade rule in step 9 fires.
+Arguments: `[--full|--light] [--reviewed] [PR title override]` — e.g. `/dev-kit:ship --full`, `/dev-kit:ship --reviewed`, `/dev-kit:ship fix: handle edge case`. The tier flag is normally chosen by the caller (the `orchestrator` plugin decides it as part of the normal workflow; a human can also pass it directly). With no flag, run the **standard** tier below, unless the auto-upgrade rule in step 9 fires.
+
+`--reviewed` means a whole-branch review that covered spec compliance and simplification has already run on this branch (the orchestrator passes it after its `implementing -> evaluated` transition). It skips step 3 (simplify) and step 7 (spec check); nothing else changes.
 
 ## Tiers
 
-- **standard** (default): spec-check, then `dev-kit:pr-reviewer` + `pr-review-toolkit:silent-failure-hunter`.
-- **`--full`**: standard, plus `dev-kit:security-reviewer`.
-- **`--light`**: skip spec-check entirely; only `dev-kit:pr-reviewer`. For docs-only or config-only branches.
+- **standard** (default): spec-check, then `dev-kit:pr-reviewer` + `pr-review-toolkit:silent-failure-hunter` + `dev-kit:security-reviewer`. A service with real users gets all three on every PR.
+- **`--full`**: the same three reviewers; the security reviewer is told which dependency, migration, egress or config change triggered the tier.
+- **`--light`**: skip spec-check entirely; only `dev-kit:pr-reviewer`. For docs-only or config-only branches with no behaviour change.
 
-All launched reviewer agents run with `model: "opus"` passed on the Agent call, regardless of tier.
+All launched reviewer agents run with `model: "opus"` passed on the Agent call, regardless of tier. They are the only Opus dispatches ship makes.
 
 ## Steps
 
@@ -43,7 +45,7 @@ If no changes (staged or unstaged), no unpushed commits, AND no existing PR — 
 
 ### 3. Simplify Changed Code
 
-Run `/simplify` on files that were modified in this branch (compared to master):
+Skip this step when `--reviewed` was passed. Otherwise run `/simplify` on files that were modified in this branch (compared to master) as a single pass, not one agent per angle:
 
 ```bash
 git diff master --name-only
@@ -87,7 +89,7 @@ This upgrade applies even if `--light` was passed — a dependency, migration, o
 
 ### 7. Spec Check
 
-Skip this step entirely for `--light`. Otherwise, launch the spec-checker agent **in the foreground** (must complete before continuing):
+Skip this step entirely for `--light` or `--reviewed`. Otherwise, launch the spec-checker agent **in the foreground** (must complete before continuing):
 
 - If the user provided a spec path → pass it explicitly
 - Otherwise → let the agent auto-detect from branch name
