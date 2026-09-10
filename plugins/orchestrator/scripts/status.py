@@ -11,9 +11,16 @@ Usage:
     status.py --brief         in-flight items only, for the SessionStart hook
     status.py --json          machine-readable
     status.py --git           also check that recorded branches exist
+    status.py --gh            also check review evidence on recorded PRs (needs gh)
     status.py --project NAME  limit to one project
 
 Stdlib only. Never writes anything.
+
+Stage is derived, not asserted. With --gh, an item whose recorded stage is at
+or past "shipped" but whose PR has no review evidence (no reviews, no
+comments, no .dev review report) is reported as blocked instead of at a human
+gate. This is the check that was missing when an unreviewed PR reached the
+merge gate (docs/incidents/2026-09-unreviewed-pr-and-budget-overrun.md).
 """
 
 from __future__ import annotations
@@ -45,8 +52,8 @@ TRANSITIONS: dict[str, str] = {
     "idea": "spec (brainstorm + writing-plans)",
     "specced": "check impact (/dev-kit:check-impact)",
     "impact_checked": "plan tests (/dev-kit:plan-tests)",
-    "tests_planned": "implement (subagent-driven-development, worktree)",
-    "implementing": "evaluate (fresh-context evaluator)",
+    "tests_planned": "implement (implementers per tier, Sonnet)",
+    "implementing": "review (whole-branch reviewer, then one fix dispatch)",
     "evaluated": "ship (/dev-kit:ship, tier chosen by orchestrator)",
     "tests_reviewed": "ship (/dev-kit:ship, tier chosen by orchestrator)",
     "shipped": "process review (/dev-kit:process-review <pr>)",
@@ -57,6 +64,52 @@ TRANSITIONS: dict[str, str] = {
 
 HUMAN_GATES = {"review_processed", "merged"}
 SKIP_DISPOSITIONS = {"defer": "deferred", "drop": "dropped", "fold": "folded"}
+
+# Stages that claim the PR reviewers have run. Reaching them without review
+# evidence is a defect in the record, not a position in the pipeline.
+REVIEWED_STAGES = {"shipped", "review_processed"}
+REVIEW_REPORT_PATTERNS = (
+    ".dev/SILENT_FAILURE_REVIEW_PR{pr}.md",
+    ".dev/SECURITY_REVIEW_PR{pr}.md",
+)
+UNREVIEWED = "blocked: PR #{pr} has no review evidence; run /dev-kit:ship reviewers, then process-review"
+
+
+def pr_evidence(project_dir: Path, pr: int | str, runner=subprocess.run) -> dict:
+    """Review evidence for one PR: counts from gh plus local .dev review reports.
+
+    Returns {"reviews": int, "comments": int, "reports": [paths], "state": str}.
+    A gh failure (offline, not authenticated, PR gone) yields zero counts and
+    state "unknown"; the caller treats that as no evidence, which fails closed.
+    """
+    reviews = comments = 0
+    state = "unknown"
+    try:
+        out = runner(
+            ["gh", "pr", "view", str(pr), "--json", "reviews,comments,state"],
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=20,
+        ).stdout
+        data = json.loads(out)
+        reviews = len(data.get("reviews") or [])
+        comments = len(data.get("comments") or [])
+        state = str(data.get("state") or "unknown")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    reports = [
+        p.format(pr=pr)
+        for p in REVIEW_REPORT_PATTERNS
+        if (project_dir / p.format(pr=pr)).exists()
+    ]
+    return {"reviews": reviews, "comments": comments, "reports": reports, "state": state}
+
+
+def has_review_evidence(evidence: dict) -> bool:
+    """A PR counts as reviewed when any reviewer left a trace."""
+    return bool(evidence["reviews"] or evidence["comments"] or evidence["reports"])
 
 
 class ConfigError(RuntimeError):
@@ -143,10 +196,12 @@ def next_action(item: dict, open_ids: set[str]) -> str:
 
 def is_in_flight(row: dict) -> bool:
     """Past idea, not done, not skipped, not waiting on a dependency."""
+    unreviewed = row["next"].startswith("blocked: PR #")
+    dependency_blocked = row["next"].startswith("blocked: P") and not unreviewed
     return (
         row["stage"] not in ("idea", "done")
         and not row["next"].startswith("skip:")
-        and not row["next"].startswith("blocked: P")
+        and not dependency_blocked
     )
 
 
@@ -163,18 +218,37 @@ def _local_branches(project_dir: Path) -> set[str]:
     return {line.strip() for line in out.splitlines() if line.strip()}
 
 
+def _project_dir(phase_files: list[Path]) -> Path:
+    """The git repository that owns the phase files (the directory holding .git)."""
+    for parent in phase_files[0].parents:
+        if (parent / ".git").exists():
+            return parent
+    return phase_files[0].parent
+
+
 def build_rows(
-    project: str, phase_files: list[Path], check_git: bool = False
+    project: str,
+    phase_files: list[Path],
+    check_git: bool = False,
+    check_gh: bool = False,
+    runner=subprocess.run,
 ) -> list[dict]:
-    """Open items of one project with their next action, in phase-file order."""
+    """Open items of one project with their next action, in phase-file order.
+
+    With ``check_gh``, items at a reviewed stage whose PR shows no review
+    evidence get ``next`` replaced by the UNREVIEWED block and ``evidence``
+    filled in; the recorded stage is reported as is so the mismatch is visible.
+    """
     items = collect_items(phase_files)
     open_ids = {i["id"] for i in items if not i["passes"]}
-    branches = _local_branches(phase_files[0].parent) if check_git else set()
+    project_dir = _project_dir(phase_files)
+    branches = _local_branches(project_dir) if check_git else set()
     rows = []
     for item in items:
         if item["passes"]:
             continue
         branch = item.get("branch") or ""
+        pr = item.get("pr", "")
         row = {
             "project": project,
             "id": item["id"],
@@ -184,20 +258,31 @@ def build_rows(
             "disposition": item.get("disposition", ""),
             "branch": branch,
             "branch_exists": bool(branch and branch in branches) if check_git else None,
-            "pr": item.get("pr", ""),
+            "pr": pr,
             "next": next_action(item, open_ids),
+            "evidence": None,
         }
+        if check_gh and pr and item["stage"] in REVIEWED_STAGES:
+            evidence = pr_evidence(project_dir, pr, runner=runner)
+            row["evidence"] = evidence
+            if not has_review_evidence(evidence):
+                row["next"] = UNREVIEWED.format(pr=pr)
         rows.append(row)
     return rows
 
 
 def build_world(
-    projects: dict[str, list[Path]], check_git: bool = False
+    projects: dict[str, list[Path]],
+    check_git: bool = False,
+    check_gh: bool = False,
+    runner=subprocess.run,
 ) -> dict[str, dict]:
     """Per project: duplicate ids, open rows, in-flight rows."""
     world: dict[str, dict] = {}
     for name, files in projects.items():
-        rows = build_rows(name, files, check_git=check_git)
+        rows = build_rows(
+            name, files, check_git=check_git, check_gh=check_gh, runner=runner
+        )
         world[name] = {
             "duplicate_ids": find_duplicate_ids(collect_items(files)),
             "open": rows,
@@ -274,6 +359,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--brief", action="store_true")
     parser.add_argument("--git", action="store_true")
+    parser.add_argument(
+        "--gh",
+        action="store_true",
+        help="check review evidence on recorded PRs; needs gh, fails closed",
+    )
     args = parser.parse_args(argv)
     try:
         root, phases = resolve_config(args.root, args.phases)
@@ -286,7 +376,7 @@ def main(argv: list[str] | None = None) -> int:
         if not projects:
             print(f"orchestrator: no project named {args.project}", file=sys.stderr)
             return 1
-    world = build_world(projects, check_git=args.git)
+    world = build_world(projects, check_git=args.git, check_gh=args.gh)
     if args.json:
         print(json.dumps(world, indent=1))
     elif args.brief:

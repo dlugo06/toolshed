@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from status import (  # noqa: E402
     STAGES,
+    UNREVIEWED,
     ConfigError,
     build_brief,
     build_report,
@@ -18,9 +19,11 @@ from status import (  # noqa: E402
     collect_items,
     discover_projects,
     find_duplicate_ids,
+    has_review_evidence,
     is_in_flight,
     main,
     next_action,
+    pr_evidence,
     resolve_config,
 )
 
@@ -148,7 +151,7 @@ def test_next_action_blockers_dispositions_and_gates(root: Path):
     open_ids = {i["id"] for i in items if not i["passes"]}
     assert next_action(by_id["P5-006"], open_ids) == "blocked: P5-011"
     assert next_action(by_id["P5-011"], open_ids) == "skip: folded"
-    assert next_action(by_id["P5-001"], open_ids) == "evaluate (fresh-context evaluator)"
+    assert next_action(by_id["P5-001"], open_ids) == "review (whole-branch reviewer, then one fix dispatch)"
     assert next_action(by_id["P5-015"], open_ids).startswith("mark passes (HUMAN GATE")
     assert next_action(by_id["P2b-002"], open_ids) == "none: done"
 
@@ -183,7 +186,7 @@ def test_report_and_brief(root: Path):
     assert "P2b-002" not in report
     brief = build_brief(world)
     assert "- alpha: 5 open, 2 in flight" in brief
-    assert "P5-001 [implementing] -> evaluate (fresh-context evaluator)" in brief
+    assert "P5-001 [implementing] -> review (whole-branch reviewer, then one fix dispatch)" in brief
     assert "P2b-001" not in brief
     assert "DUPLICATE IDS: B-001" in brief
 
@@ -192,6 +195,99 @@ def test_brief_when_nothing_in_flight(tmp_path: Path):
     _project(tmp_path, "solo", {"phase1": {"items": [{"id": "S-1", "title": "t", "passes": False}]}})
     brief = build_brief(build_world(discover_projects(tmp_path, PHASES)))
     assert "nothing in flight across 1 project(s), 1 open items" in brief
+
+
+class _FakeRun:
+    """Stand-in for subprocess.run that answers `gh pr view` from a table."""
+
+    def __init__(self, answers: dict[str, dict | Exception]):
+        self.answers = answers
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(argv)
+        answer = self.answers[argv[3]]
+        if isinstance(answer, Exception):
+            raise answer
+
+        class _Done:
+            stdout = json.dumps(answer)
+
+        return _Done()
+
+
+def _reviewed_project(tmp_path: Path) -> Path:
+    return _project(
+        tmp_path,
+        "gamma",
+        {
+            "phase1": {
+                "items": [
+                    {"id": "G-1", "title": "reviewed", "passes": False, "stage": "review_processed", "pr": 84},
+                    {"id": "G-2", "title": "unreviewed", "passes": False, "stage": "review_processed", "pr": 85},
+                    {"id": "G-3", "title": "report only", "passes": False, "stage": "shipped", "pr": 86},
+                    {"id": "G-4", "title": "gh down", "passes": False, "stage": "shipped", "pr": 87},
+                    {"id": "G-5", "title": "not shipped yet", "passes": False, "stage": "implementing", "pr": 88},
+                ]
+            }
+        },
+    )
+
+
+def test_pr_evidence_counts_reviews_comments_and_reports(tmp_path: Path):
+    proj = _reviewed_project(tmp_path)
+    (proj / ".dev").mkdir()
+    (proj / ".dev" / "SECURITY_REVIEW_PR86.md").write_text("x")
+    run = _FakeRun({"86": {"reviews": [], "comments": [], "state": "OPEN"}})
+    ev = pr_evidence(proj, 86, runner=run)
+    assert ev == {"reviews": 0, "comments": 0, "reports": [".dev/SECURITY_REVIEW_PR86.md"], "state": "OPEN"}
+    assert has_review_evidence(ev) is True
+    assert run.calls[0][:4] == ["gh", "pr", "view", "86"]
+
+
+def test_pr_evidence_fails_closed_when_gh_fails(tmp_path: Path):
+    proj = _reviewed_project(tmp_path)
+    run = _FakeRun({"87": OSError("gh not found")})
+    ev = pr_evidence(proj, 87, runner=run)
+    assert ev == {"reviews": 0, "comments": 0, "reports": [], "state": "unknown"}
+    assert has_review_evidence(ev) is False
+
+
+def test_gh_check_blocks_reviewed_stages_without_evidence(tmp_path: Path):
+    proj = _reviewed_project(tmp_path)
+    (proj / ".dev").mkdir()
+    (proj / ".dev" / "SILENT_FAILURE_REVIEW_PR86.md").write_text("x")
+    run = _FakeRun(
+        {
+            "84": {"reviews": [{"id": 1}], "comments": [], "state": "OPEN"},
+            "85": {"reviews": [], "comments": [], "state": "OPEN"},
+            "86": {"reviews": [], "comments": [], "state": "OPEN"},
+            "87": OSError("offline"),
+        }
+    )
+    rows = {r["id"]: r for r in build_rows("gamma", discover_projects(tmp_path, PHASES)["gamma"], check_gh=True, runner=run)}
+    assert rows["G-1"]["next"] == "merge (HUMAN GATE)"
+    assert rows["G-2"]["next"] == UNREVIEWED.format(pr=85)
+    assert rows["G-2"]["stage"] == "review_processed"  # the mismatch stays visible
+    assert rows["G-3"]["next"] == "process review (/dev-kit:process-review <pr>)"
+    assert rows["G-4"]["next"] == UNREVIEWED.format(pr=87)
+    assert rows["G-5"]["evidence"] is None  # not a reviewed stage: gh never called
+    assert [c[3] for c in run.calls] == ["84", "85", "86", "87"]
+
+
+def test_without_gh_flag_stage_is_trusted(tmp_path: Path):
+    _reviewed_project(tmp_path)
+    rows = {r["id"]: r for r in build_rows("gamma", discover_projects(tmp_path, PHASES)["gamma"])}
+    assert rows["G-2"]["next"] == "merge (HUMAN GATE)"
+    assert rows["G-2"]["evidence"] is None
+
+
+def test_brief_shows_unreviewed_block(tmp_path: Path):
+    _reviewed_project(tmp_path)
+    run = _FakeRun({str(n): {"reviews": [], "comments": [], "state": "OPEN"} for n in (84, 85, 86, 87)})
+    brief = build_brief(build_world(discover_projects(tmp_path, PHASES), check_gh=True, runner=run))
+    assert "G-2 [review_processed] -> " + UNREVIEWED.format(pr=85) in brief
+    assert "merge (HUMAN GATE)" not in brief
 
 
 def test_main_exit_codes_and_json(root: Path, capsys, monkeypatch):

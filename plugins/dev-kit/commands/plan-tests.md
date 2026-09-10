@@ -5,7 +5,9 @@ description: Generate test scenario plans for the current branch's implementatio
 
 Generate test scenario plans for the current branch's implementation plan.
 
-Launch the **test-scenario-planner** agent to analyze the implementation plan, read source code, and produce a structured Given/When/Then scenario map per task. Run this after `writing-plans` and `/dev-kit:check-impact`, and before `executing-plans` or `subagent-driven-development`.
+Arguments: `[plan path] [--fix|--standard|--full]`. The tier bounds the plan: `--fix` targets 15-25 scenarios, `--standard` 30-50, `--full` as many as the tasks need. Default `--standard`. A 53-scenario plan for a fix-tier bundle once produced 1,400 lines of tests for 300 lines of code; the bound exists for that reason.
+
+Launch the **test-scenario-planner** agent (`model: "sonnet"`, passed explicitly) to analyze the implementation plan, read the source it touches, and produce a structured Given/When/Then scenario map per task. Run this after `writing-plans` and `/dev-kit:check-impact`, and before implementation. The brief is under 150 words: the plan path, the tier, the impact report path, the output path.
 
 ## Pre-check
 
@@ -23,6 +25,7 @@ Before launching the test scenario planner, verify that `/dev-kit:check-impact` 
    - Generates end-to-end scenarios that exercise real filtering/routing logic (not mocked)
    - Generates "negative path completeness" scenarios for every filter/drop behavior
    - Flags tests that may enshrine bugs by asserting drops without justification
-4. Present the scenario plan to the user for review and approval
-5. If the user requests changes, relay them to the agent and regenerate
-6. Once approved, confirm: "Test scenario plan approved. Ready for implementation with `/execute` or `subagent-driven-development`."
+4. The agent's **Step 7: Predicate Verification** lists every classification predicate in the plan (which exceptions, inputs or states take which branch) next to the real raise sites and callers it found in the code, and flags mismatches. A plan once said "no status code means a network error"; the code wrapped parser bugs in the same exception type. Read this section first.
+5. Present the scenario plan and the red flags to the user for review and approval. In an orchestrator run, the orchestrator rules on the red flags from the plan and the code and records the rulings; it does not dismiss any.
+6. If changes are requested, relay them to the same agent (SendMessage) rather than launching a new one.
+7. Once approved, confirm: "Test scenario plan approved. Ready for implementation."

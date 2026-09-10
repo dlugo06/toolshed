@@ -5,17 +5,22 @@ description: Ship the current branch: simplify, test, commit, push, create PR, a
 
 Ship the current branch: simplify, test, commit, push, create PR, and launch reviewers.
 
-Arguments: `[--full|--light] [--reviewed] [PR title override]` — e.g. `/dev-kit:ship --full`, `/dev-kit:ship --reviewed`, `/dev-kit:ship fix: handle edge case`. The tier flag is normally chosen by the caller (the `orchestrator` plugin decides it as part of the normal workflow; a human can also pass it directly). With no flag, run the **standard** tier below, unless the auto-upgrade rule in step 9 fires.
+Arguments: `[--full|--fix|--light] [--reviewed] [PR title override]` — e.g. `/dev-kit:ship --full`, `/dev-kit:ship --reviewed --fix`, `/dev-kit:ship fix: handle edge case`. The tier flag is normally chosen by the caller (the `orchestrator` plugin decides it as part of the normal workflow; a human can also pass it directly). With no flag, run the **standard** tier below, unless the auto-upgrade rule in step 6 fires.
 
 `--reviewed` means a whole-branch review that covered spec compliance and simplification has already run on this branch (the orchestrator passes it after its `implementing -> evaluated` transition). It skips step 3 (simplify) and step 7 (spec check); nothing else changes.
 
+**Ship is the only way a PR is opened or pushed for review.** "Just open the PR", "get it ready", "push it up" are this command. A PR that exists without review evidence (`gh pr view <n> --json reviews,comments` shows none, and no `.dev/*_REVIEW_PR<n>.md`) is an unshipped PR: run steps 4, 6 and 10 against it. Skipping the reviewers on request is recorded by the caller as a waived stage; ship itself never skips them. (An unreviewed PR once reached the merge gate this way; see the orchestrator plugin's incident record.)
+
 ## Tiers
 
-- **standard** (default): spec-check, then `dev-kit:pr-reviewer` + `pr-review-toolkit:silent-failure-hunter` + `dev-kit:security-reviewer`. A service with real users gets all three on every PR.
+- **standard** (default): spec-check, then `dev-kit:pr-reviewer` + `pr-review-toolkit:silent-failure-hunter` + `dev-kit:security-reviewer`.
 - **`--full`**: the same three reviewers; the security reviewer is told which dependency, migration, egress or config change triggered the tier.
+- **`--fix`**: one reviewer, `dev-kit:pr-reviewer` in **combined mode** (its brief says `mode: fix-tier combined`): it runs its own checklist plus the silent-failure and security checklists in a single pass and posts one review. For `fix`-tier items: one subsystem, a reproduction in hand. Three Opus reviewers re-reading one small diff cost ~0.5M tokens; this tier exists for that reason.
 - **`--light`**: skip spec-check entirely; only `dev-kit:pr-reviewer`. For docs-only or config-only branches with no behaviour change.
 
 All launched reviewer agents run with `model: "opus"` passed on the Agent call, regardless of tier. They are the only Opus dispatches ship makes.
+
+Every reviewer brief is under 150 words and carries the input contract: the PR number; "read `gh pr diff` once; read full files only for the functions the diff touches; do not re-read specs; findings only, no restatement; report under 400 words; end with one line naming what you did not read". Do not paste the spec, plan, test plan or impact report into the brief; name the plan path only.
 
 ## Steps
 
@@ -37,7 +42,7 @@ git log origin/<branch-name>..HEAD --oneline 2>/dev/null
 ```
 
 Determine what work has ALREADY been done:
-- PR already open? → skip PR creation in step 8, use existing PR number
+- PR already open? → skip PR creation in step 9, use existing PR number, and check `gh pr view <n> --json reviews,comments` plus `.dev/*_REVIEW_PR<n>.md`: no evidence means the reviewers in step 10 still run
 - Already pushed with no new local commits? → skip push in step 7
 - No uncommitted changes? → skip commit in step 5 (but still run simplify + tests)
 
@@ -55,11 +60,13 @@ Apply any improvements suggested by simplify. If simplify changes code, re-run t
 
 ### 4. Run Tests
 
+Run each suite **once**, and only if no subagent has reported a green full run at the current HEAD (an implementer's or fix wave's report naming this commit's counts is that evidence; read it instead of re-running). When you do run:
+
 ```bash
 pytest
 ```
 
-ALL tests must pass. If any fail — STOP. Fix failures before shipping.
+ALL tests must pass. If any fail — STOP. Fix failures before shipping. Never run the suites twice in the same ship; never run them "to be sure" after a green report.
 
 ### 5. Commit
 
@@ -147,9 +154,12 @@ If a PR already exists for this branch, skip creation and use the existing PR nu
 
 Launch every reviewer for the resolved tier in a SINGLE message (parallel tool calls, all in background). Every Agent call passes `model: "opus"` and the PR number.
 
-- **standard**: `subagent_type: "dev-kit:pr-reviewer"` and `subagent_type: "pr-review-toolkit:silent-failure-hunter"`
-- **`--full`**: standard, plus `subagent_type: "dev-kit:security-reviewer"`
+- **standard**: `subagent_type: "dev-kit:pr-reviewer"`, `subagent_type: "pr-review-toolkit:silent-failure-hunter"`, `subagent_type: "dev-kit:security-reviewer"`
+- **`--full`**: the same three; the security reviewer's brief names the triggering change
+- **`--fix`**: `subagent_type: "dev-kit:pr-reviewer"` only, brief line `mode: fix-tier combined`
 - **`--light`**: `subagent_type: "dev-kit:pr-reviewer"` only
+
+If the PR already existed and step 2 found no review evidence, this step runs regardless of how the PR was opened.
 
 ### 11. Report
 

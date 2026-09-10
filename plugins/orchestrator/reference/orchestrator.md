@@ -18,10 +18,10 @@ A project is any git repository directly under the root with at least one matchi
 ## Read the world
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/status.py" --git
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/status.py" --git --gh
 ```
 
-Then, for any project you will act on:
+`--gh` derives the stage of every recorded PR from its review evidence (see §Stage is derived, not asserted). Then, for any project you will act on:
 
 ```bash
 gh pr list -R <owner/repo> --state open --json number,headRefName,reviewDecision,statusCheckRollup
@@ -47,6 +47,26 @@ A unit is one item in a phase file. The orchestrator keeps its state on the item
 
 The phase progress file (`*.progress.md` next to the phase file, if the project keeps one) is the human log. Append one line per transition. Rulings the orchestrator makes on the owner's behalf (a plan defect resolved, a review finding rejected) go on that line with the reason; there is no second ledger.
 
+### Stage is derived, not asserted
+
+The `stage` field is a claim. Before acting on an item, check the claim against artifacts and lower the stage to what the artifacts support:
+
+| claimed stage | evidence required |
+|---|---|
+| `impact_checked` | `.dev/BEHAVIORAL_IMPACT_<branch>.md` exists for this branch |
+| `tests_planned` | `.dev/test-plan-<branch>.md` exists for this branch |
+| `evaluated` | the whole-branch review report names the current HEAD |
+| `shipped` | the PR exists and `gh pr view <pr> --json reviews,comments` shows the reviewers' posts, or `.dev/*_REVIEW_PR<pr>.md` exists |
+| `review_processed` | the decision table is on the PR and the fix commit is pushed |
+
+`status.py --gh` performs the `shipped`/`review_processed` check and reports `blocked: PR #n has no review evidence` instead of a merge gate when it fails; the SessionStart brief runs it whenever `gh` is installed. Missing evidence is never "probably done in another session". Lower the stage, log the reason in the progress file, and run the missing transition.
+
+This rule exists because an unreviewed PR reached the merge gate with a `review_processed` stage inherited from a related item (`docs/incidents/2026-09-unreviewed-pr-and-budget-overrun.md`).
+
+### Direct requests are entry points, not exemptions
+
+"Get the PR ready", "ship this", "just open the PR", "continue PR N" all mean: find the item's evidenced stage and run the pipeline from there. The request never skips a stage. When the owner explicitly waives a stage ("no reviewers on this one"), record `waived: ["<stage>"]` on the item with the date so the record says the stage was skipped on purpose; nothing else may skip it. A PR opened outside `dev-kit:ship` is at most `implementing`.
+
 ## Who executes a stage
 
 The orchestrator is a skill, not a plugin boundary. It decides which plugin runs each stage, and the stage table below is the whole decision. Inside an orchestrator run, the rule "invoke a skill if it might apply" is suspended: invoke exactly the skill or agent the table names for the current stage and tier, and nothing else. In particular:
@@ -67,7 +87,9 @@ The tier is chosen at `idea -> specced` from what the item is, recorded as `tier
 | `standard` | a feature inside existing architecture, or a fix that touches more than one subsystem | 12 |
 | `full` | a phase's foundational task, a new subsystem, a new dependency, migration, new egress or route, secret or config schema change | 20 |
 
-The cap counts every `Agent` dispatch made for the item from `specced` to `review_processed`, including reviewers launched by `dev-kit:ship`. The orchestrator keeps the count in the item's `agents` field and prints it in every report. Reaching the cap is a stop: report, and let the owner raise it. It is never raised silently.
+The cap counts every `Agent` dispatch made for the item from `specced` to `review_processed`, including reviewers launched by `dev-kit:ship`. The orchestrator increments the item's `agents` field **immediately after each dispatch**, not at the end of the transition, and prints it in every report. Reaching the cap is a stop: report, and let the owner raise it. It is never raised silently. (A `fix` item once consumed 10 dispatches with the field still at 0; the cap only works if the count is kept.)
+
+Token guideline per tier, for the whole pipeline of one item (subagent tokens as reported in completion notices): `fix` ≈ 1.0M, `standard` ≈ 2.0M, `full` ≈ 4.0M. Two `fix` items that cost 3M between them exhausted an account's 5-hour window. When a single dispatch exceeds a third of the tier's guideline, the report says so and names the cause (usually: the brief made the agent re-read the repository, or the agent re-ran suites).
 
 Default when unsure: `fix` if the item has a reproduction, otherwise `standard`. `full` is chosen only for the triggers listed.
 
@@ -78,11 +100,11 @@ One row per stage. The middle three columns say what runs for each tier; "—" m
 | stage | leave it by | `fix` | `standard` | `full` |
 |---|---|---|---|---|
 | idea | spec | write the spec and plan in the main session; `superpowers:brainstorming` only if the cause is unknown; then `superpowers:writing-plans` | `superpowers:brainstorming` then `superpowers:writing-plans` | same as standard |
-| specced | check impact | `/dev-kit:check-impact` (Sonnet) | same | same |
-| impact_checked | plan tests | `/dev-kit:plan-tests` (Sonnet) | same | same |
+| specced | check impact | `/dev-kit:check-impact` (Sonnet); it also verifies every classification predicate in the plan against the code's raise sites | same | same |
+| impact_checked | plan tests | `/dev-kit:plan-tests --fix` (Sonnet, 15-25 scenarios) | `/dev-kit:plan-tests` (30-50) | same as standard |
 | tests_planned | implement | one implementer per batch of related tasks (Sonnet), briefed from the plan, no per-task reviewer | same | one implementer per task (Sonnet), one task reviewer per task (Sonnet), fix rounds capped at 2 |
-| implementing | review | one whole-branch reviewer (Opus) with the spec, the plan, and the item's `steps_to_verify`; it reports spec compliance, the verification checklist, correctness, and simplification findings in one pass; one fix dispatch (Sonnet) for its findings, no re-review agent | same, plus `/dev-kit:review-tests` (Sonnet) before the fix dispatch | same as standard, plus the fresh-context evaluator (Sonnet) using the project's evaluator prompt |
-| evaluated | ship | `/dev-kit:ship --reviewed` (the whole-branch review already covered the spec and simplification, so ship skips both); reviewers per §Ship tier | `/dev-kit:ship --reviewed` | `/dev-kit:ship --reviewed --full` |
+| implementing | review | one whole-branch reviewer (Sonnet on `fix`, Opus otherwise) with the plan and the item's `steps_to_verify`; it reports spec compliance, the verification checklist, correctness, and simplification findings in one pass; one fix dispatch (Sonnet) for its findings, no re-review agent | same, plus `/dev-kit:review-tests` (Sonnet) before the fix dispatch | same as standard, plus the fresh-context evaluator (Sonnet) using the project's evaluator prompt |
+| evaluated | ship | `/dev-kit:ship --reviewed --fix` (the whole-branch review already covered the spec and simplification, so ship skips both); one reviewer per §Ship tier | `/dev-kit:ship --reviewed` | `/dev-kit:ship --reviewed --full` |
 | shipped | process review | `/dev-kit:process-review <pr>`: the decision table, then one fix dispatch (Sonnet), no re-review agent | same | same |
 | review_processed | merge | HUMAN GATE. Report, stop. | same | same |
 | merged | passes: true | HUMAN GATE. Merged means deployed. The owner verifies manually and confirms; only then set `passes`. Report, stop. | same | same |
@@ -93,31 +115,40 @@ There is no end-to-end test stage. Integration tests are the automated gate; man
 
 ### Ship tier (the orchestrator chooses, not the owner)
 
-`dev-kit:ship` launches the PR reviewers. Every project that serves real users runs all three on every PR; the orchestrator states the ship tier and why.
+`dev-kit:ship` launches the PR reviewers. The orchestrator states the ship tier and why.
 
 | tier | when | reviewers |
 |---|---|---|
 | `--light` | docs or config only, no behaviour change | pr-reviewer |
+| `--fix` | a `fix`-tier item (one subsystem, reproduction in hand) | pr-reviewer in combined mode: it runs the silent-failure and security checklists in the same pass and posts one review |
 | standard (default) | everything else | pr-reviewer, silent-failure-hunter, security-reviewer |
 | `--full` | new dependency, new egress or HTTP client, new untrusted input or route, migration, secret or config schema change, or a `full`-tier item | the same three, with the security reviewer told what changed |
 
-The reviewers run on Opus. They are the only Opus dispatches besides the whole-branch reviewer.
+The reviewers run on Opus. They are the only Opus dispatches besides the whole-branch reviewer. Three Opus reviewers each re-reading the same diff cost about 0.5M tokens per PR; on a `fix` item that is half the item's budget, which is why `--fix` folds the three checklists into one pass. The auto-upgrade rule in `ship` still applies: a dependency, migration or egress change in a `fix` item runs all three.
+
+Every reviewer brief carries the input contract: read `gh pr diff` once; read full files only for the functions the diff touches; do not re-read specs the plan already summarises; findings only, no restatement of the PR; the report is capped at 400 words. A reviewer that cannot verify a claim says so instead of reading more of the repository.
 
 ### Models
 
 | role | model |
 |---|---|
-| whole-branch reviewer; PR reviewers launched by `dev-kit:ship` | Opus |
+| PR reviewers launched by `dev-kit:ship`; whole-branch reviewer on `standard` and `full` | Opus |
+| whole-branch reviewer on `fix` | Sonnet |
 | everything else: implementers, impact checker, test-scenario planner, test-quality reviewer, evaluator, task reviewers (`full` only), process-review fixer | Sonnet |
+| read-only questions about existing code ("what does this retry path do", "which tests cover X") | the smallest available model, as an explore agent with a three-question brief; never a general-purpose Sonnet agent |
 | the orchestrator itself | the session model |
 
-Pass `model` explicitly on every `Agent` call. An omitted model inherits the session's, which is usually the most expensive one.
+Pass `model` explicitly on every `Agent` call. An omitted model inherits the session's, which is usually the most expensive one. Agent definition files may carry their own `model:`; the orchestrator's table wins, so the call must pass it.
 
 A FAIL from a reviewer does not move the stage backward. Record `blocked_reason` and stop.
 
+### Verification runs once
+
+Implementers run the covering tests per task and the full suites once before their last commit, and report the counts. Fix waves run the covering tests per fix and the full suites once. The controller does not re-run a suite that a subagent reported green at the current HEAD; it reads the report. `dev-kit:ship` runs the suites once more only when the HEAD has changed since the last reported green run. Four controller re-runs of a 100 s suite after green reports is the pattern this forbids.
+
 ### Budget shape of a `fix` item
 
-For reference, a `fix` item that goes cleanly through the pipeline dispatches: impact checker, test planner, one or two implementers, one whole-branch reviewer, one fix dispatch, three PR reviewers, one process-review fixer. That is eight to nine agents, one to two of them on Opus besides the three PR reviewers. A run that dispatches per-task reviewers, re-reviewers, a separate spec checker, a separate evaluator, and a multi-agent simplify pass costs three to four times that for the same diff.
+For reference, a `fix` item that goes cleanly through the pipeline dispatches: impact checker, test planner, one or two implementers, one whole-branch reviewer (Sonnet), one fix dispatch, one combined PR reviewer (Opus), one process-review fixer. That is seven to eight agents, one of them on Opus, inside the cap of 8. A run that dispatches per-task reviewers, re-reviewers, a separate spec checker, a separate evaluator, three PR reviewers, and a multi-agent simplify pass costs three to four times that for the same diff.
 
 ## Selecting work (`next`)
 
@@ -140,6 +171,10 @@ For every open item in a project propose one of `keep`, `fold: <target>`, `defer
 - Before asking the owner anything, consult the `mind` plugin if installed, then the project's auto-memory and `CLAUDE.md`. If the answer is there, apply it and cite the source. If not, ask once, then record the answer.
 - Brainstorming and spec writing are interactive; run them in the main session, never in a subagent.
 - Subagent prompts are short: a brief file path, one line on where the task fits, the report path, and the report contract. Plans are checklists, not fixtures. Never paste prior-task history into a dispatch.
+- Input contract for every dispatch (this is the token budget's only enforcement point): the brief is under 150 words; it names ONE plan or brief path, ONE report path to write, and the path of the previous stage's report to read; it never lists spec + plan + test plan + impact report together (the plan already summarises them). Agents read the diff or plan once, read full files only for the functions they touch, and end their report with one line naming what they did not read.
+- Fix-wave and implementer agents commit after every task or fix, so a killed agent (rate limit, timeout) leaves committed, attributable work instead of an uncommitted tree. They never add verification steps the brief did not ask for (no Docker builds, no extra suites).
+- Evidence gathering (logs, issue lists, monitor histories) is written to the session scratch directory and summarised with `awk`/`jq` before it enters the controller's context. Never print a multi-hundred-line dump into the conversation.
+- Claims about a third-party library's behavior (what a logger becomes, what a transport drops, what an exception class carries) are verified against the installed source or its documentation before they enter a spec, a plan, or a docstring. A spec once asserted a logger's records became breadcrumbs; the library ignores that logger.
 - Implementers never dispatch subagents of their own; reviewers never dispatch reviewers.
 - One transition per unit per invocation. Report, then stop.
 - Work only inside `TOOLSHED_PROJECTS_ROOT`.
