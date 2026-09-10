@@ -5,7 +5,10 @@ description: Process review comments on a PR: read each comment, fix or reject w
 
 Process review comments on a PR: read each comment, fix or reject with reasoning.
 
-Argument: PR number (e.g., `/dev-kit:process-review 48`)
+Arguments: PR number, then optional flags (e.g., `/dev-kit:process-review 48`, `/dev-kit:process-review 48 --autonomous --no-replies`).
+
+- `--autonomous`: the caller is the orchestrator or the owner has said the run is unattended. The decision table is still produced, but instead of stopping for approval it is ruled on from the project's stored preferences (auto-memory, `CLAUDE.md`, prior decision tables) and **posted as a PR comment** titled `process-review decision table (<date>)`; that comment is the audit record the owner reads later. Without the flag, step 4's STOP applies.
+- `--no-replies`: skip the per-thread replies in step 7 (the owner reads the table instead). The table is never skipped.
 
 ## Steps
 
@@ -111,38 +114,36 @@ Present a summary table to the user BEFORE taking action:
 | 3 | review body | — | @reviewer | Overall approach... | Fix | Valid architectural concern |
 ```
 
-## **STOP. Wait for user approval before proceeding. Do NOT apply any fixes until the user confirms.**
+## **STOP. Wait for user approval before proceeding. Do NOT apply any fixes until the user confirms.** (With `--autonomous`: rule on every row from stored preferences, post the table on the PR, and continue. A row you cannot rule on from the record is `Reject (needs owner)` with the question in the reasoning column, never a silent fix.)
 
 ### 5. Apply Fixes
 
-After user approval, write the approved "fix" rows to a brief file and dispatch **one** implementer subagent (`model: "sonnet"`) with that brief. It applies every fix, runs the covering tests, and commits. Do not dispatch one agent per finding and do not dispatch a re-review agent; the PR reviewers already ran, and the next review of this diff is the human's at merge.
+After approval, write the approved "fix" rows to a brief file (under 150 words plus the rows; name the report paths, never paste the reviews) and dispatch **one** implementer subagent (`model: "sonnet"`) with that brief. Do not dispatch one agent per finding and do not dispatch a re-review agent; the PR reviewers already ran, and the next review of this diff is the human's at merge.
 
-For each comment classified as "fix", the brief states:
-- Make the code change
-- Keep changes minimal and scoped to what the reviewer requested
-- Do not refactor surrounding code
+The brief states, for the whole wave:
+- Make each code change with a RED test first; keep it minimal and scoped to what the reviewer requested; do not refactor surrounding code
+- **Commit after each fix** (`fix: <finding> (PR #N review)`), so a killed agent leaves committed work; a fix wave once lost ~300k tokens of uncommitted work to a rate-limit kill
+- Run the covering tests per fix and the full suites **once**, before the last commit; report the counts
+- Do no verification the brief did not ask for (no Docker builds, no extra suites, no repo-wide reads)
+- Read `gh pr diff` once and the `.dev` review reports; read full files only for the functions being fixed
 
-### 6. Run Tests
+### 6. Verify
 
-Before committing, verify all tests pass (TDD enforcement):
+Read the fixer's report: it must name the full-suite counts at the final commit. If it does, do not re-run the suites here. If the report is missing the counts (the agent was killed or skipped them), run them once:
 ```bash
 pytest
 ```
 
-If any test fails, fix it before proceeding. Do not commit with failing tests.
+If any test fails, fix it before proceeding. Do not push with failing tests.
 
-### 7. Commit Changes
+### 7. Push and Reply
 
-Stage and commit all fixes in a single commit using conventional commit format:
+The fixer already committed per fix. Push:
 ```bash
-git add <changed files>
-git commit -m "fix: address PR #$ARGUMENTS review feedback
-
-- <brief description of fix 1>
-- <brief description of fix 2>
-..."
 git push
 ```
+
+Then reply in each unresolved thread with the fix or the technical reason for rejecting (skipped with `--no-replies`).
 
 ### 8. Summary
 
@@ -159,9 +160,9 @@ PR #XX review comments processed:
 ## Rules
 
 - **Before starting**, invoke `superpowers:receiving-code-review` -- this enforces technical rigor when evaluating feedback, preventing blind agreement or blind rejection
-- **NEVER auto-approve** -- always present the decision table and STOP until the user explicitly approves
-- **Never silently skip a comment** -- every unresolved thread gets a reply; do not resolve threads (replies are enough, resolving is API noise)
-- **One fix subagent, no re-review subagent** -- the fix wave is a single Sonnet dispatch; verification is the test suite plus the human merge
-- **Always wait for user approval** of the decision table before making changes
-- **Always run `pytest` before committing** -- this project enforces TDD strictly
+- **NEVER auto-approve** -- present the decision table and STOP until the user explicitly approves, unless `--autonomous` was passed, in which case the table is posted on the PR as the record and rulings come from stored preferences only
+- **Never silently skip a comment** -- every finding appears in the table with a decision; threads get replies unless `--no-replies`; do not resolve threads (replies are enough, resolving is API noise)
+- **One fix subagent, no re-review subagent** -- the fix wave is a single Sonnet dispatch that commits per fix; verification is the test suite once plus the human merge
+- **Suites run once** -- in the fixer, at its final commit; the caller re-runs only when the report lacks the counts
+- **Reviewer accuracy is checked, not assumed** -- a finding that contradicts the code (a predicate the reviewer misread, an exception class that cannot reach the site) is a Reject with the file:line that shows why; a finding that is right about a pre-existing defect outside the PR's scope is a Reject (scope) that is written to the project's follow-up notes, never dropped
 - **Use conventional commits** -- prefix with `fix:`, not freeform messages
