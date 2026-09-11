@@ -22,7 +22,24 @@ case "$CMD" in
     *) exit 0 ;;
 esac
 
-BRANCH="$(git branch --show-current 2>/dev/null || true)"
+# Resolve the repository the command targets, not the session's cwd: a leading
+# `cd <dir> &&` or a `git -C <dir>` names it. A commit in a second checkout on a
+# feature branch was once blocked because the session cwd sat on master.
+DIR="."
+case "$CMD" in
+    cd\ *)
+        DIR="$(printf '%s' "$CMD" | sed -n 's/^cd[[:space:]]\{1,\}\([^[:space:];&|]*\).*/\1/p')"
+        ;;
+esac
+case "$CMD" in
+    *git\ -C\ *)
+        D2="$(printf '%s' "$CMD" | sed -n 's/.*git[[:space:]]\{1,\}-C[[:space:]]\{1,\}\([^[:space:];&|]*\).*/\1/p')"
+        [ -n "$D2" ] && DIR="$D2"
+        ;;
+esac
+[ -z "$DIR" ] && DIR="."
+
+BRANCH="$(git -C "$DIR" branch --show-current 2>/dev/null || true)"
 
 case "$BRANCH" in
     master|main)

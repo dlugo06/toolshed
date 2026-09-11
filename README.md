@@ -4,13 +4,15 @@ A Claude Code plugin marketplace for the owner's own development workflow: a TDD
 
 ## Plugins
 
-### [`dev-kit`](plugins/dev-kit/) — 1.0.0
+### [`dev-kit`](plugins/dev-kit/) — 1.2.0
 
-A TDD workflow toolkit for Claude Code. Ships 10 specialist review agents (PR reviewer, security reviewer, DBA, QA bug hunter, code architect, spec checker, test quality reviewer, test scenario planner, behavioral impact checker, Ralph initializer), 13 slash commands (`/dev-kit:ship`, `/dev-kit:process-review`, `/dev-kit:check-impact`, `/dev-kit:plan-tests`, `/dev-kit:review-tests`, `/dev-kit:spec-check`, and more), the Ralph autonomous development loop for unattended batch work, JSON-based PRD task tracking, and hookify safety guardrails. `/dev-kit:ship` chooses its reviewer tier (standard, `--full`, or `--light`) based on what changed, or on an explicit flag.
+A TDD workflow toolkit for Claude Code. Ships 10 specialist review agents (PR reviewer, security reviewer, DBA, QA bug hunter, code architect, spec checker, test quality reviewer, test scenario planner, behavioral impact checker, Ralph initializer), 13 slash commands (`/dev-kit:ship`, `/dev-kit:process-review`, `/dev-kit:check-impact`, `/dev-kit:plan-tests`, `/dev-kit:review-tests`, `/dev-kit:spec-check`, and more), the Ralph autonomous development loop for unattended batch work, JSON-based PRD task tracking, and hookify safety guardrails.
 
-### [`orchestrator`](plugins/orchestrator/) — 0.1.0
+`/dev-kit:ship` runs one of four reviewer tiers: **standard** (three Opus reviewers), **`--full`** (the same three, the security reviewer told what changed; auto-selected when the diff touches a dependency manifest, `.env.example`, migrations, or new egress), **`--fix`** (one Opus `pr-reviewer` in combined mode carrying the silent-failure and security checklists, for small single-subsystem bugs), or **`--light`** (docs/config only). `--reviewed` skips simplify and spec-check when a whole-branch review already ran. `/dev-kit:process-review` has `--autonomous` (rulings from stored preferences, decision table posted on the PR) and `--no-replies`. `/dev-kit:plan-tests` takes `--fix|--standard|--full` to bound the scenario count. Suites run once per change; agents read the diff once and write their report file before they finish.
 
-A cross-project work router. Reads every project's PRD items, assigns each one a pipeline stage, runs the single next transition, and stops at human gates — so work advances across multiple repos without the owner having to manually pick the next task in each one.
+### [`orchestrator`](plugins/orchestrator/) — 1.2.0
+
+A cross-project work router. Reads every project's PRD items, assigns each one a pipeline stage and a tier (`fix` / `standard` / `full`, with subagent caps of 8 / 12 / 20 and a token guideline per tier), runs the single next transition by invoking only the skill or agent its stage table names, records the result on the item, and stops at the two human gates (merge, and `passes`). With the `gh` CLI installed, an item's stage is derived from evidence (the PR's reviews and the `.dev` review reports), never trusted as asserted. The reference (`plugins/orchestrator/reference/orchestrator.md`) holds the stage machine, the model table, the input contract for every dispatch, reference dispatch costs, and the guardrails (named-path staging, `--body-file`, hook-aware lookups, inline micro-fixes for one-file test-or-string changes, no attribution trailers unless the owner asks).
 
 ### [`mind`](plugins/mind/) — 0.0.1
 
@@ -64,13 +66,24 @@ Copy what you need, search for `TODO:` across the copied files, and fill in your
 ## Layout
 
 ```
-.claude-plugin/marketplace.json   # marketplace catalog
+.claude-plugin/marketplace.json   # marketplace catalog (plugin versions live here too)
+CHANGELOG.md                      # one entry per version; every plugin change bumps the version
+docs/incidents/                   # post-mortems that changed the rules
 plugins/<plugin-name>/            # one folder per plugin
   .claude-plugin/plugin.json      # plugin manifest (name, version, ...)
   agents/, commands/, hooks/      # auto-discovered by Claude Code
+  skills/                         # orchestrator: status, triage, next, advance
+  reference/, scripts/, tests/    # orchestrator: the reference document, status.py, its tests
   templates/                      # files meant to be copied into an adopting project (dev-kit only)
   README.md
 ```
+
+## Changing a plugin
+
+Two things happen in the same PR as any plugin change, without exception:
+
+1. **Bump the version** in `plugins/<name>/.claude-plugin/plugin.json` and in the matching `.claude-plugin/marketplace.json` entry, with a `CHANGELOG.md` entry. Installed copies only update when the version changes.
+2. **Update the READMEs**: this file (versions and the capability summaries above) and `plugins/<name>/README.md` (commands, flags, stages, environment). A plugin PR without a README diff is incomplete.
 
 ## License
 
