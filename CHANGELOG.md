@@ -8,6 +8,8 @@
 - dev-kit `plan-tests` / `test-scenario-planner`: YAGNI ruling for guarded inputs; predicate rulings name accept/reject fixtures; plans that carry test bodies are mapped, not re-derived; the scenario map is written with the Write tool before the final message; a missing impact report is reported, not fabricated.
 - dev-kit `behavioral-impact-checker`: the report file is written before the final message (a run returned its verdict only in the completion message); `git grep` for the spec index; the brief may name one spec to read in full.
 - dev-kit `pr-reviewer`: reads the plan's Rulings section as decided; checks user-facing strings against the project's language rule.
+- READMEs (root, orchestrator, dev-kit) brought up to date with 1.1.0 and 1.2.0: versions, ship tiers including `--fix`, process-review flags, tier table with caps and token guidelines, evidence-derived stages, hook behaviour. Root README gains §Changing a plugin: every plugin change bumps the version and updates the READMEs in the same PR.
+- dev-kit hooks `block-protected-branch-commit.sh` and `block-force-push-protected-branch.sh`: resolve the target repository from a leading `cd <dir> &&` or `git -C <dir>` instead of the session cwd (a commit in a second checkout on a feature branch was blocked because the session cwd sat on master).
 - dev-kit hook `block-force-push-protected-branch.sh`: matches the pushed refspec, not any `master`/`main` substring in the command (a `--force-with-lease` of a feature branch was blocked because the same command line contained `origin/master..branch`).
 
 ## 1.1.0 (incident response, see `docs/incidents/2026-09-unreviewed-pr-and-budget-overrun.md`)

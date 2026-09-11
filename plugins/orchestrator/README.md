@@ -32,7 +32,17 @@ The SessionStart hook prints what is in flight so a fresh session starts with th
 
 State lives on the PRD items: `stage`, `tier`, `agents`, `branch`, `pr`, `disposition`, `blocked_reason`, `updated`. `passes` belongs to the owner. The stage machine, pipeline tiers (`fix`, `standard`, `full`, each with a subagent cap and a model table), selection rules, ship tiers and guardrails are in `reference/orchestrator.md`.
 
-The orchestrator decides which plugin executes each stage. Inside a run it invokes only what the stage table names: `superpowers` for brainstorming and plan writing, `dev-kit` for the checks and the ship pipeline, and its own implementer and reviewer dispatches for the rest. Per-task review loops, separate spec checkers, evaluators and multi-agent simplify passes are reserved for the `full` tier; a `fix` item is capped at eight subagents, two of them on Opus besides the three PR reviewers.
+The orchestrator decides which plugin executes each stage. Inside a run it invokes only what the stage table names: `superpowers` for brainstorming and plan writing, `dev-kit` for the checks and the ship pipeline, and its own implementer and reviewer dispatches for the rest. Skill handoff prompts that say otherwise (an execution-mode choice, "invoke this sub-skill first", "stop for approval") are not followed inside a run. Per-task review loops, separate spec checkers, evaluators and multi-agent simplify passes are reserved for the `full` tier.
+
+| tier | when | cap | token guideline | Opus dispatches |
+|---|---|---|---|---|
+| `fix` | a bug with a reproduction, one subsystem | 8 | ≈ 1.0M | one: the combined PR reviewer launched by `ship --fix` |
+| `standard` | a feature inside existing architecture, or a fix across subsystems | 12 | ≈ 2.0M | the whole-branch reviewer plus three PR reviewers |
+| `full` | foundational work, new subsystem, dependency, migration, egress, required config or secret | 20 | ≈ 4.0M | same as standard |
+
+A clean `fix` item runs seven or eight dispatches: impact checker, test planner, one implementer, one whole-branch reviewer (Sonnet), one fix wave, one Opus PR reviewer, one process-review fixer. The `agents` field is incremented after every dispatch; reaching the cap stops the run.
+
+Rules the reference enforces on every run (see `reference/orchestrator.md` §Guardrails): every dispatch brief is under 150 words and names one plan, one report path and one prior report; a stage is recorded only after the agent's report file exists on disk; a spec gives every classification predicate a positive and a negative fixture from the existing tests and names the language of every user-facing string; implementers report, never patch, a pre-existing test the plan did not name; reviewers treat the plan's Rulings as decided; a ruling of at most one file and twenty lines that is test-only or a string/log change is applied inline instead of dispatched; staging is by named path; PR bodies go through `--body-file`; no attribution trailers unless the owner asked. When the owner asks for a session retro, it is kept as `.dev/SESSION_NOTES_<date>.md` in the project with a per-agent token ledger.
 
 ## Item shape
 
