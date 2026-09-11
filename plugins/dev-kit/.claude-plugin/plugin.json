@@ -1,6 +1,6 @@
 {
   "name": "dev-kit",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "TDD workflow toolkit for Claude Code: 10 specialist review agents, 13 slash commands (ship, process-review, check-impact, plan-tests, review-tests, spec-check, and more), the Ralph autonomous development loop, PRD-based task tracking, and hookify safety guardrails.",
   "author": {
     "name": "dlugo06",
