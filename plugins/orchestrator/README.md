@@ -15,6 +15,8 @@ export TOOLSHED_PHASES_ROOT="docs/prd/phase*.json"    # glob, relative to each p
 
 A project is any git repository directly under the root with at least one matching phase file. Nothing outside the root is read.
 
+Optional: install the [`gh` CLI](https://cli.github.com) and authenticate it. When present, `status.py --gh` (and the SessionStart brief) reads each recorded PR's reviews/comments and `.dev` review reports to derive its real stage from evidence, instead of trusting the `stage` field as asserted — see §Stage is derived, not asserted in `reference/orchestrator.md`. Without `gh`, the orchestrator falls back to the asserted `stage` field alone.
+
 ## Skills
 
 | skill | does |

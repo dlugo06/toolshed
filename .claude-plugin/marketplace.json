@@ -14,7 +14,7 @@
       "name": "dev-kit",
       "source": "dev-kit",
       "description": "TDD workflow toolkit for Claude Code: 10 specialist review agents, 13 slash commands (ship, process-review, check-impact, plan-tests, review-tests, spec-check, and more), the Ralph autonomous development loop, PRD-based task tracking, and hookify safety guardrails.",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": {
         "name": "dlugo06",
         "url": "https://github.com/dlugo06"
@@ -27,7 +27,7 @@
       "name": "orchestrator",
       "source": "orchestrator",
       "description": "Cross-project work router: reads every project's PRD items, assigns each a pipeline stage, runs the single next transition, stops at human gates",
-      "version": "0.1.0",
+      "version": "1.1.0",
       "author": {
         "name": "dlugo06",
         "url": "https://github.com/dlugo06"
