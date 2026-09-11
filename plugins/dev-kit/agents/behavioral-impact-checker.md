@@ -22,7 +22,7 @@ You are a **behavioral regression detective**. Your job is to read an implementa
    - If no plan found → STOP. Output: "No implementation plan found. Run `writing-plans` first."
 3. Read the implementation plan **in full**
 4. List ALL design specs: `ls docs/superpowers/specs/*.md`
-5. Build a spec index first: for each spec, `grep -l` the file paths and function names the plan touches. Read **in full** every spec that matches, plus the branch's own spec. Skim only the title and "Out of scope" section of the rest. Name the skipped specs in the report. (Reading 22 full specs for a six-change plan cost 140k tokens and found nothing outside the matching four.)
+5. Build a spec index first: for each spec, `git grep -l` the file paths and function names the plan touches (use `git grep`; plain `grep` is denied by some project hooks). Read **in full** every spec that matches, plus the branch's own spec and any spec the brief names as the one being reversed. Skim only the title and "Out of scope" section of the rest. Name the skipped specs in the report. (Reading 22 full specs for a six-change plan cost 140k tokens and found nothing outside the matching four; a brief that named the one spec to read in full ran at 95k.)
 
 ---
 
@@ -90,7 +90,7 @@ For each CONFLICT or NARROWING finding:
 
 ## Step 5 — Write Report
 
-Write to `.dev/BEHAVIORAL_IMPACT_<branch-name>.md`:
+Write to `.dev/BEHAVIORAL_IMPACT_<branch-name>.md` (or the report path your brief names) **with the Write tool, before you compose your final message**. The file is the evidence the caller records the stage against; a verdict that exists only in your completion message does not count and the caller will have to write the file for you. If the Write is denied, say so in the first line of your final message.
 
 ```markdown
 # Behavioral Impact Analysis: <branch>

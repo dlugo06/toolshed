@@ -25,12 +25,19 @@ case "$CMD" in
     *) exit 0 ;;
 esac
 
-case "$CMD" in
-    *master*|*main*)
-        echo "Blocked: refusing to force-push over master/main." >&2
-        exit 2
-        ;;
-esac
+# Match the pushed refspec, not any substring of the command: a feature-branch
+# force-push whose command line also mentions `origin/master..branch` (a log or
+# filter-branch range in the same chain) must not be blocked. A word is a
+# protected destination when it is exactly master/main (optionally +-prefixed),
+# ends in `:master`/`:main`, or is the full ref name.
+for WORD in $CMD; do
+    case "$WORD" in
+        master|main|+master|+main|*:master|*:main|refs/heads/master|refs/heads/main)
+            echo "Blocked: refusing to force-push over master/main." >&2
+            exit 2
+            ;;
+    esac
+done
 
 # No explicit branch named — check if we're currently on master/main and about
 # to push there (e.g. `git push --force` with no refspec, or `origin HEAD`).

@@ -118,7 +118,7 @@ Present a summary table to the user BEFORE taking action:
 
 ### 5. Apply Fixes
 
-After approval, write the approved "fix" rows to a brief file (under 150 words plus the rows; name the report paths, never paste the reviews) and dispatch **one** implementer subagent (`model: "sonnet"`) with that brief. Do not dispatch one agent per finding and do not dispatch a re-review agent; the PR reviewers already ran, and the next review of this diff is the human's at merge.
+After approval, write the approved "fix" rows to a brief file (under 150 words plus the rows; name the report paths, never paste the reviews) and dispatch **one** implementer subagent (`model: "sonnet"`) whose prompt is a single line pointing at that brief file. Post the decision table with `gh pr comment <n> --body-file <scratch>/decision-table.md`, never an inline heredoc (project hooks deny command text that names guarded functions). Do not dispatch one agent per finding and do not dispatch a re-review agent; the PR reviewers already ran, and the next review of this diff is the human's at merge.
 
 The brief states, for the whole wave:
 - Make each code change with a RED test first; keep it minimal and scoped to what the reviewer requested; do not refactor surrounding code
@@ -159,7 +159,10 @@ PR #XX review comments processed:
 
 ## Rules
 
-- **Before starting**, invoke `superpowers:receiving-code-review` -- this enforces technical rigor when evaluating feedback, preventing blind agreement or blind rejection
+- **Before starting** in an interactive run, invoke `superpowers:receiving-code-review` -- this enforces technical rigor when evaluating feedback, preventing blind agreement or blind rejection. In an orchestrator run (`--autonomous`) it is not invoked; the orchestrator reference names the only skills that run inside a transition
+- **A fix-tier PR usually has one review body and no inline threads.** When the thread query returns none, the decision table comment is the whole record; step 7's per-thread replies have nothing to do and are skipped without `--no-replies`
+- **Tiny waves stay in the caller.** When every "Fix" row is test-only or a string/log-field change, one file, under twenty lines in total, the caller applies them directly with the covering test run once (the orchestrator reference's inline micro-fix rule) instead of dispatching the fixer; a fixer dispatch for one flipped test cost 81k tokens
+- **Rulings already made are not re-opened.** A finding that re-litigates a trade-off recorded in the plan's Rulings section or the spec is `Reject (decided)` citing that section; a follow-up note goes on the PRD item when the reviewer's concern deserves later work
 - **NEVER auto-approve** -- present the decision table and STOP until the user explicitly approves, unless `--autonomous` was passed, in which case the table is posted on the PR as the record and rulings come from stored preferences only
 - **Never silently skip a comment** -- every finding appears in the table with a decision; threads get replies unless `--no-replies`; do not resolve threads (replies are enough, resolving is API noise)
 - **One fix subagent, no re-review subagent** -- the fix wave is a single Sonnet dispatch that commits per fix; verification is the test suite once plus the human merge
