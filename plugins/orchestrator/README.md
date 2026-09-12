@@ -15,7 +15,7 @@ export TOOLSHED_PHASES_ROOT="docs/prd/phase*.json"    # glob, relative to each p
 
 A project is any git repository directly under the root with at least one matching phase file. Nothing outside the root is read.
 
-Optional: install the [`gh` CLI](https://cli.github.com) and authenticate it. When present, `status.py --gh` (and the SessionStart brief) reads each recorded PR's reviews/comments and `.dev` review reports to derive its real stage from evidence, instead of trusting the `stage` field as asserted — see §Stage is derived, not asserted in `reference/orchestrator.md`. Without `gh`, the orchestrator falls back to the asserted `stage` field alone.
+Optional: install the [`gh` CLI](https://cli.github.com) and authenticate it. When present, `status.py --gh` (and the SessionStart brief) reads each recorded PR's reviews/comments and `.dev` review reports to derive its real stage from evidence, instead of trusting the `stage` field as asserted — see §Stage is derived, not asserted in `reference/orchestrator.md`. Without `gh`, the orchestrator falls back to the asserted `stage` field alone. `--git` (always passed by the SessionStart brief) also reports when the local default branch is behind or ahead of origin, so a stale checkout does not list merged PRs at the merge gate.
 
 ## Skills
 
@@ -37,12 +37,12 @@ The orchestrator decides which plugin executes each stage. Inside a run it invok
 | tier | when | cap | token guideline | Opus dispatches |
 |---|---|---|---|---|
 | `fix` | a bug with a reproduction, one subsystem | 8 | ≈ 1.0M | one: the combined PR reviewer launched by `ship --fix` |
-| `standard` | a feature inside existing architecture, or a fix across subsystems | 12 | ≈ 2.0M | the whole-branch reviewer plus three PR reviewers |
+| `standard` | a feature inside existing architecture, or a fix across subsystems | 14 | ≈ 2.0M | the whole-branch reviewer plus three PR reviewers |
 | `full` | foundational work, new subsystem, dependency, migration, egress, required config or secret | 20 | ≈ 4.0M | same as standard |
 
-A clean `fix` item runs seven or eight dispatches: impact checker, test planner, one implementer, one whole-branch reviewer (Sonnet), one fix wave, one Opus PR reviewer, one process-review fixer. The `agents` field is incremented after every dispatch; reaching the cap stops the run.
+A clean `fix` item runs seven or eight dispatches: impact checker, test planner, one implementer, one whole-branch reviewer (Sonnet), one fix wave, one Opus PR reviewer, one process-review fixer. A clean `standard` item runs twelve or thirteen: two implementers, the Opus whole-branch reviewer and review-tests dispatched together, source and test-hygiene fix waves in parallel, three Opus PR reviewers. The `agents` field is incremented after every dispatch; reaching the cap stops the run.
 
-Rules the reference enforces on every run (see `reference/orchestrator.md` §Guardrails): every dispatch brief is under 150 words and names one plan, one report path and one prior report; a stage is recorded only after the agent's report file exists on disk; a spec gives every classification predicate a positive and a negative fixture from the existing tests and names the language of every user-facing string; implementers report, never patch, a pre-existing test the plan did not name; reviewers treat the plan's Rulings as decided; a ruling of at most one file and twenty lines that is test-only or a string/log change is applied inline instead of dispatched; staging is by named path; PR bodies go through `--body-file`; no attribution trailers unless the owner asked. When the owner asks for a session retro, it is kept as `.dev/SESSION_NOTES_<date>.md` in the project with a per-agent token ledger.
+Rules the reference enforces on every run (see `reference/orchestrator.md` §Guardrails): every dispatch brief is under 150 words and names one plan, one report path and one prior report; a stage is recorded only after the agent's report file exists on disk; a spec gives every classification predicate a positive and a negative fixture from the existing tests, names the language of every user-facing string, and names the render call sites of any field that must reach an output surface; a plan's quoted helper signatures and changed literals are checked with `git grep` before it is committed; implementer briefs scope tests to plan-named plus Critical rows; implementers report, never patch, a pre-existing test the plan did not name; reviewers treat the plan's Rulings as decided; a ruling of at most one file and twenty lines that is test-only or a string/log change is applied inline instead of dispatched; staging is by named path; PR bodies go through `--body-file`; no attribution trailers unless the owner asked. When the owner asks for a session retro, it is kept as `.dev/SESSION_NOTES_<date>.md` in the project with a per-agent token ledger.
 
 ## Item shape
 

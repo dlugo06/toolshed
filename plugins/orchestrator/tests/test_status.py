@@ -300,3 +300,48 @@ def test_main_exit_codes_and_json(root: Path, capsys, monkeypatch):
     payload = json.loads(capsys.readouterr().out)
     assert list(payload) == ["alpha"]
     assert [r["id"] for r in payload["alpha"]["in_flight"]] == ["P5-001", "P5-015"]
+
+
+class _SyncRun:
+    """Stand-in for subprocess.run answering `git rev-list --left-right --count`."""
+
+    def __init__(self, stdout: str | None):
+        self.stdout = stdout
+
+    def __call__(self, argv, **kwargs):
+        if self.stdout is None:
+            raise OSError("no origin")
+
+        class _Done:
+            stdout = self.stdout
+
+        return _Done()
+
+
+def test_default_branch_sync_reports_ahead_and_behind(tmp_path: Path):
+    from status import _sync_note, default_branch_sync
+
+    sync = default_branch_sync(tmp_path, runner=_SyncRun("2\t1\n"))
+    assert sync == {"branch": "main", "ahead": 2, "behind": 1}
+    assert _sync_note(sync) == (
+        " (local main behind origin by 1, ahead of origin by 2; "
+        "fetch and fast-forward before cutting a branch)"
+    )
+    assert _sync_note({"branch": "main", "ahead": 0, "behind": 0}) == ""
+    assert default_branch_sync(tmp_path, runner=_SyncRun(None)) is None
+    assert _sync_note(None) == ""
+
+
+def test_brief_and_report_carry_the_sync_note(root: Path, monkeypatch):
+    import status as mod
+
+    monkeypatch.setattr(
+        mod, "default_branch_sync", lambda d, runner=None: {"branch": "master", "ahead": 0, "behind": 3}
+    )
+    world = build_world(discover_projects(root, PHASES), check_git=True)
+    brief = build_brief(world)
+    assert "- alpha: 5 open, 2 in flight (local master behind origin by 3; fetch and fast-forward before cutting a branch)" in brief
+    report = build_report(world, check_git=True)
+    assert "Open items: 5, in flight: 2 (local master behind origin by 3;" in report
+    world = build_world(discover_projects(root, PHASES))
+    assert world["alpha"]["sync"] is None
