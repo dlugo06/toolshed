@@ -1271,6 +1271,16 @@ def test_cmd_inject_index_budget_of_10_still_prints_projects_index(repo, tmp_pat
     assert "\n# Projects\n\n- proj-a | proj-a |  | Describe the project: purpose, kind of work, repo URL.\n" in out
 
 
+def test_main_inject_reports_config_error_on_stdout_and_returns_0(tmp_path, capsys):
+    """The hook only redirects stderr; a ConfigError from inject (e.g. a
+    missing MIND_REPO reaching main() directly, or a future validation
+    error) must be visible on stdout, not silently exit 0 with nothing
+    printed at all."""
+    rc = mind.main(["inject", "--event", "startup"], env={}, cwd=tmp_path)
+    assert rc == 0
+    assert capsys.readouterr().out == "mind: MIND_REPO is not set\n"
+
+
 def test_main_inject_never_fails_the_hook(repo, tmp_path, monkeypatch, capsys):
     cfg, _, _ = repo
     monkeypatch.setattr(mind, "cmd_inject", lambda c, e, w: (_ for _ in ()).throw(RuntimeError("boom")))

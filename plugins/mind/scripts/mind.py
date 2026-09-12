@@ -805,19 +805,26 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
     if args.cmd is None:
         print(USAGE, file=sys.stderr)
         return 2
-    try:
-        cfg = Config.from_env(env, cwd)
-    except ConfigError as exc:
-        print(f"mind: {exc}", file=sys.stderr)
-        return 1
     if args.cmd == "inject":
+        # The hook redirects only stderr to /dev/null and always exits 0:
+        # any message meant to reach the owner (a bad MIND_REPO, a crash)
+        # must go to stdout, or it is silently swallowed.
         try:
+            cfg = Config.from_env(env, cwd)
             msg = ensure_checkout(cfg) or cmd_inject(cfg, args.event, cwd)
+        except ConfigError as exc:
+            print(f"mind: {exc}")
+            return 0
         except Exception as exc:
             print(f"mind: inject failed, {exc}")
             return 0
         print(msg)
         return 0
+    try:
+        cfg = Config.from_env(env, cwd)
+    except ConfigError as exc:
+        print(f"mind: {exc}", file=sys.stderr)
+        return 1
     if args.cmd != "reindex":
         clone_failed = ensure_checkout(cfg)
         if clone_failed:
