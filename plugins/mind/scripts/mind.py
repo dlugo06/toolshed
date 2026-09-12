@@ -413,14 +413,32 @@ def _validate_slug(slug: str) -> None:
         raise ValidationError(f"invalid project slug: {slug!r}")
 
 
+def _probe_cfg(cfg: Config) -> Config:
+    """A Config for read-only probes in `cwd` -- the one genuinely untrusted
+    repo here. No MIND_TOKEN in the child's environment at all (a hostile
+    .git/config's core.sshCommand or credential helper must never be able to
+    read it), and no token means git_base_args never adds our credential
+    helper either."""
+    env = {k: v for k, v in cfg.env.items() if k != "MIND_TOKEN"}
+    return dataclasses.replace(cfg, token=None, env=env)
+
+
+def _probe_git(cfg: Config, args: list[str], cwd: Path) -> subprocess.CompletedProcess | None:
+    try:
+        return git(cfg, args, cwd, 5)
+    except subprocess.TimeoutExpired:
+        return None
+
+
 def resolve_candidate(cfg: Config, cwd: Path) -> str:
     if cfg.project:
         return _slugify(cfg.project)
-    origin = subprocess.run(["git", "remote", "get-url", "origin"], cwd=cwd, capture_output=True, text=True)
-    if origin.returncode == 0 and origin.stdout.strip():
+    probe_cfg = _probe_cfg(cfg)
+    origin = _probe_git(probe_cfg, ["remote", "get-url", "origin"], cwd)
+    if origin is not None and origin.returncode == 0 and origin.stdout.strip():
         return _slugify(origin.stdout.strip().rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1])
-    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True, text=True)
-    if top.returncode == 0 and top.stdout.strip():
+    top = _probe_git(probe_cfg, ["rev-parse", "--show-toplevel"], cwd)
+    if top is not None and top.returncode == 0 and top.stdout.strip():
         return _slugify(Path(top.stdout.strip()).name)
     return _slugify(cwd.name)
 

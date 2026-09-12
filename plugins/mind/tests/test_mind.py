@@ -572,6 +572,54 @@ def test_resolve_candidate_prefers_env_then_origin_then_dirs(tmp_path, repo):
     assert mind.resolve_candidate(forced, sub) == "forced-name"       # env, lowercased like the rest
 
 
+def test_resolve_candidate_ignores_inherited_git_dir(tmp_path, repo):
+    """An exported GIT_DIR (as inside any git hook) must not redirect
+    resolve_candidate's probes to a different repo than the untrusted cwd."""
+    cfg, _, _ = repo
+    work = tmp_path / "real-repo"
+    work.mkdir()
+    _git(["init", "-q", str(work)], tmp_path)
+    _git(["remote", "add", "origin", "git@example.com:o/real-repo.git"], work)
+    other_repo = tmp_path / "other"
+    _git(["init", "-q", str(other_repo)], tmp_path)
+    _git(["remote", "add", "origin", "git@example.com:o/other.git"], other_repo)
+    poisoned_env = dict(os.environ, GIT_DIR=str(other_repo / ".git"), GIT_WORK_TREE=str(other_repo))
+    poisoned_cfg = dataclasses.replace(cfg, env=poisoned_env)
+    assert mind.resolve_candidate(poisoned_cfg, work) == "real-repo"
+
+
+def test_resolve_candidate_strips_mind_token_from_child_environment(repo, tmp_path, monkeypatch):
+    """A hostile .git/config in the untrusted cwd (core.sshCommand, a
+    credential helper) must never inherit MIND_TOKEN."""
+    cfg, _, _ = repo
+    cfg = dataclasses.replace(cfg, token="sekrit", env=dict(os.environ, MIND_TOKEN="sekrit"))
+    work = tmp_path / "w"
+    work.mkdir()
+    captured = {}
+    real_popen = subprocess.Popen
+
+    def spy(args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return real_popen(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    mind.resolve_candidate(cfg, work)
+    assert "MIND_TOKEN" not in captured["env"]
+
+
+def test_resolve_candidate_falls_back_to_cwd_name_on_timeout(repo, tmp_path, monkeypatch):
+    """No timeout previously meant a hung git could block the SessionStart
+    hook past every budget; a timed-out probe must fall through cleanly,
+    not raise."""
+    cfg, _, _ = repo
+    monkeypatch.setattr(
+        mind, "git",
+        lambda c, a, cw, t: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd="git", timeout=t)))
+    work = tmp_path / "Fallback-Name"
+    work.mkdir()
+    assert mind.resolve_candidate(cfg, work) == "fallback-name"
+
+
 def test_match_project_by_slug_and_alias(repo):
     cfg, _, _ = repo
     _write_project(cfg, "acme-api", aliases=("acme-api-old", "acme-backend"))
