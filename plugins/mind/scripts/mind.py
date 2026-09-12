@@ -1021,7 +1021,15 @@ def read_pending(cfg: Config, since: str | None, limit: int) -> list[dict]:
     return rows[:limit]
 
 
+_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
 def mark_pending(cfg: Config, ts: str) -> None:
+    if not _TIMESTAMP_RE.fullmatch(ts):
+        # A typo (e.g. "2026-9-12") compares wrongly as a plain string
+        # against the ISO timestamps rows are filtered by, silently
+        # re-surfacing or hiding prompts on the next `pending` read.
+        raise ValidationError(f"invalid timestamp: {ts!r}, expected YYYY-MM-DDTHH:MM:SSZ")
     _watermark_file(cfg).write_text(ts + "\n", encoding="utf-8")
 
 

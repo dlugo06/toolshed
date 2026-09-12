@@ -2106,6 +2106,16 @@ def test_read_and_mark_pending(repo):
     assert mind.read_pending(cfg, "2026-09-12T11:00:00Z", 200) == []
 
 
+def test_mark_pending_rejects_malformed_timestamp(repo):
+    """L: a typo'd `--mark` value (e.g. "2026-9-12") compares wrongly as a
+    plain string against ISO timestamps and would re-surface or hide
+    prompts silently; validate the shape instead of writing it."""
+    cfg, _, _ = repo
+    with pytest.raises(mind.ValidationError, match="invalid timestamp"):
+        mind.mark_pending(cfg, "2026-9-12")
+    assert not mind._watermark_file(cfg).exists()
+
+
 def test_clear_pending_truncates_file_and_keeps_watermark(repo):
     """M5: `pending --clear` empties the captured-prompt file (which can
     carry pasted secrets) without touching the watermark, so the digest
