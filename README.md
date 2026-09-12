@@ -16,7 +16,7 @@ A cross-project work router. Reads every project's PRD items, assigns each one a
 
 ### [`mind`](plugins/mind/) — 0.1.0
 
-Owner preference and decision store. A SessionStart hook pulls a private notes repo (`MIND_REPO`) and injects the global index, the current project's index, and the list of known projects. `/mind:remember` writes a typed note and pushes it; `/mind:ask` searches notes and cites IDs. Inert without `MIND_REPO`.
+Owner preference and decision store. A SessionStart hook pulls a private notes repo (`MIND_REPO`) and injects the global index, the current project's index, and the list of known projects; indexes are generated locally and gitignored in the data repo, never committed. `/mind:remember` writes a typed note, detects an ID collision after pulling and takes the next free ID, and pushes it; `/mind:ask` searches notes and cites IDs. Inert without `MIND_REPO`.
 
 ## Install
 

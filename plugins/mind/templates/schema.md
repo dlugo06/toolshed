@@ -11,7 +11,7 @@ strength: must        # must | should | default | optional
 status: accepted      # draft | accepted | superseded | deprecated
 affirmed: 2026-09-11  # last date the owner confirmed it
 supersedes: null      # ID of the note this replaces, if any
-source: CLAUDE.md, erp-quotes, 2026-09-11   # where the claim came from
+source: CLAUDE.md, acme-api, 2026-09-11   # where the claim came from
 ---
 One or two sentences stating the claim.
 
@@ -20,7 +20,7 @@ One or two sentences stating the claim.
 **Related:** [[PREF-REV-004-do-not-resolve-pr-threads]]
 ```
 
-Type semantics (from the 2026-09-06 research):
+Type semantics:
 
 - **principle**: always true, MUST or MUST NOT.
 - **preference**: default choice when several are valid; applied without asking.
@@ -32,7 +32,7 @@ Type semantics (from the 2026-09-06 research):
 ID scheme: `<TYPE>-<STAGE>-<NNN>`, with type codes PRIN, PREF, DEC, PROC,
 GOT, REF and stage codes ID, PROD, PLAN, DEV, TEST, REV, REL, DEPLOY, MON,
 SEC. Numbers are assigned per scope folder, so a project note is cited with
-its slug: `erp-quotes/GOT-DEPLOY-004`. A global note is cited bare.
+its slug: `acme-api/GOT-DEPLOY-004`. A global note is cited bare.
 
 Status semantics: only `accepted` notes appear in injected indexes. `draft`
 notes are counted in the injection ("N drafts await acceptance") and listed
