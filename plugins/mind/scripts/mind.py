@@ -174,6 +174,11 @@ def git_base_args(cfg: Config) -> list[str]:
 
 def git(cfg: Config, args: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess:
     env = dict(cfg.env)
+    # An inherited GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE would make every call
+    # operate on whatever repo the owner's shell happens to have exported,
+    # not cfg.home — including a `reset --hard`.
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_NAMESPACE"):
+        env.pop(var, None)
     if cfg.token:
         env["MIND_TOKEN"] = cfg.token
     env.setdefault("GIT_TERMINAL_PROMPT", "0")

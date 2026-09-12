@@ -319,6 +319,21 @@ def test_sync_pushes_local_commits_and_retries_once(repo):
     assert log == ["mind: add a", "b", "init"]
 
 
+def test_git_pops_inherited_git_dir_env_vars(repo, tmp_path):
+    """If the owner's shell exports GIT_DIR (some tools do), every mind.py
+    git call must still operate on cfg.home, not that other repo — reset
+    --hard under an inherited GIT_DIR/GIT_WORK_TREE would hit the wrong
+    working tree entirely."""
+    cfg, _, _ = repo
+    other_repo = tmp_path / "other"
+    _git(["init", "-q", str(other_repo)], tmp_path)
+    poisoned_env = dict(os.environ, GIT_DIR=str(other_repo / ".git"), GIT_WORK_TREE=str(other_repo),
+                        GIT_INDEX_FILE=str(other_repo / ".git" / "index"), GIT_NAMESPACE="poisoned")
+    poisoned_cfg = dataclasses.replace(cfg, env=poisoned_env)
+    out = mind.git(poisoned_cfg, ["rev-parse", "--show-toplevel"], poisoned_cfg.home, 5).stdout.strip()
+    assert Path(out).resolve() == poisoned_cfg.home.resolve()
+
+
 def test_git_sets_default_ssh_command_without_overriding_existing(repo, monkeypatch):
     cfg, _, _ = repo
     captured = {}
