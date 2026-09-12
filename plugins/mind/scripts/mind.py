@@ -7,6 +7,7 @@ import dataclasses
 import datetime as dt
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -107,6 +108,125 @@ def load_notes(notes_dir: Path) -> list[Note]:
         meta, body = parse_frontmatter(path.read_text())
         notes.append(Note(path, meta, body))
     return notes
+
+
+GIT_TIMEOUTS = {"clone": 30, "pull": 10, "push": 20}
+
+
+class ConfigError(Exception):
+    pass
+
+
+@dataclasses.dataclass(frozen=True)
+class Config:
+    repo: str
+    home: Path
+    token: str | None
+    project: str | None
+
+    @classmethod
+    def from_env(cls, env, cwd: Path) -> "Config":
+        repo = env.get("MIND_REPO")
+        if not repo:
+            raise ConfigError("MIND_REPO is not set")
+        if env.get("MIND_HOME"):
+            home = Path(env["MIND_HOME"])
+        elif env.get("CLAUDE_PLUGIN_DATA"):
+            home = Path(env["CLAUDE_PLUGIN_DATA"]) / "repo"
+        else:
+            home = Path(env.get("HOME", str(Path.home()))) / ".mind" / "repo"
+        return cls(repo, home, env.get("MIND_TOKEN") or None, env.get("MIND_PROJECT") or None)
+
+
+def git_base_args(cfg: Config) -> list[str]:
+    args = ["git"]
+    if cfg.token:
+        helper = "!f() { echo username=x-access-token; echo password=$MIND_TOKEN; }; f"
+        args += ["-c", f"credential.helper={helper}"]
+    return args
+
+
+def git(cfg: Config, args: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    if cfg.token:
+        env["MIND_TOKEN"] = cfg.token
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    return subprocess.run(git_base_args(cfg) + args, cwd=cwd, env=env, capture_output=True,
+                          text=True, timeout=timeout)
+
+
+def _head_date(cfg: Config) -> str:
+    out = git(cfg, ["log", "-1", "--format=%cs"], cfg.home, 5)
+    return out.stdout.strip() or "unknown"
+
+
+def ensure_checkout(cfg: Config) -> str | None:
+    if (cfg.home / ".git").is_dir():
+        return None
+    cfg.home.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = git(cfg, ["clone", "-q", cfg.repo, str(cfg.home)], cfg.home.parent, GIT_TIMEOUTS["clone"])
+    except subprocess.TimeoutExpired:
+        return "mind: clone failed, timed out"
+    if proc.returncode != 0:
+        return "mind: clone failed, " + proc.stderr.strip().splitlines()[-1:][0] if proc.stderr.strip() else "mind: clone failed"
+    return None
+
+
+def pull(cfg: Config) -> str | None:
+    try:
+        proc = git(cfg, ["pull", "-q", "--ff-only"], cfg.home, GIT_TIMEOUTS["pull"])
+    except subprocess.TimeoutExpired:
+        proc = None
+    if proc is None or proc.returncode != 0:
+        return f"mind: offline, using cached copy from {_head_date(cfg)}"
+    return None
+
+
+def commit_all(cfg: Config, message: str) -> None:
+    git(cfg, ["add", "-A"], cfg.home, 10)
+    git(cfg, ["commit", "-q", "-m", message], cfg.home, 10)
+
+
+def _ahead(cfg: Config) -> bool:
+    proc = git(cfg, ["rev-list", "--count", "@{u}..HEAD"], cfg.home, 5)
+    return proc.returncode == 0 and proc.stdout.strip() not in ("", "0")
+
+
+def push(cfg: Config) -> str | None:
+    try:
+        proc = git(cfg, ["push", "-q"], cfg.home, GIT_TIMEOUTS["push"])
+    except subprocess.TimeoutExpired:
+        return "mind: push failed, note is committed locally; it will push on the next remember or session start"
+    if proc.returncode != 0:
+        return "mind: push failed, note is committed locally; it will push on the next remember or session start"
+    return None
+
+
+def sync(cfg: Config, pull_only: bool = False) -> str | None:
+    if _ahead(cfg):
+        try:
+            proc = git(cfg, ["pull", "-q", "--rebase"], cfg.home, GIT_TIMEOUTS["pull"])
+        except subprocess.TimeoutExpired:
+            proc = None
+        if proc is None or proc.returncode != 0:
+            git(cfg, ["rebase", "--abort"], cfg.home, 5)
+            return f"mind: offline, using cached copy from {_head_date(cfg)}"
+    else:
+        msg = pull(cfg)
+        if msg:
+            return msg
+    if pull_only or not _ahead(cfg):
+        return None
+    msg = push(cfg)
+    if msg is None:
+        return None
+    # One retry: the remote may have moved between the pull and the push.
+    proc = git(cfg, ["pull", "-q", "--rebase"], cfg.home, GIT_TIMEOUTS["pull"])
+    if proc.returncode != 0:
+        git(cfg, ["rebase", "--abort"], cfg.home, 5)
+        return msg
+    return push(cfg)
 
 
 def build_parser() -> argparse.ArgumentParser:
