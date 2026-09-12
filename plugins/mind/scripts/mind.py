@@ -1139,11 +1139,7 @@ def _all_note_files(cfg: Config) -> list[tuple[str, Path]]:
 
 def cmd_lint(cfg: Config, days: int) -> str:
     # Two passes, not one: every malformed row must precede every mismatch
-    # row (file order within each group), and a single interleaved pass over
-    # _all_note_files (sorted by path) would instead interleave them by file
-    # order across both categories -- wrong whenever a mismatch's file sorts
-    # before a malformed one's, as the plan's own pinned test does (005
-    # mismatch, 007 malformed).
+    # row, which a single interleaved pass (sorted by path) would not guarantee.
     rows: list[str] = []
     wellformed: list[tuple[str, Path, dict, str]] = []
     for prefix, path in _all_note_files(cfg):
@@ -1309,7 +1305,7 @@ def cmd_doctor(cfg: Config) -> str:
     return "\n".join(_redact(line, cfg) for line in lines) + "\n"
 
 
-def _ask_row(prefix: str, note: "Note", drafts: bool, tag: str = "") -> str:
+def _ask_row(prefix: str, note: "Note", drafts: bool, *, tag: str = "") -> str:
     line = f"{tag}{prefix}{note.id} | {note.title} | {note.meta.get('scope', 'global')} | {note.strength}"
     if drafts:
         line += " | draft"
