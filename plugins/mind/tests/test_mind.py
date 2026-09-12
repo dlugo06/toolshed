@@ -2389,6 +2389,15 @@ def test_settings_defaults_and_set(repo):
     assert mind.load_settings(cfg) == {"auto_answer": False, "escalate": False}   # string false is false; junk keeps the default
 
 
+def test_settings_set_rejects_unrecognised_value(repo):
+    """L: `settings --set auto_answer=maybe` must reject the value instead
+    of silently storing false, same as `in (...)` did before."""
+    cfg, _, _ = repo
+    with pytest.raises(mind.ValidationError, match="auto_answer must be true/false/1/0/yes/no/on/off"):
+        mind.cmd_settings(cfg, ["auto_answer=maybe"])
+    assert not (cfg.home.parent / "settings.json").exists()
+
+
 def test_load_settings_corrupt_json_returns_defaults(repo):
     cfg, _, _ = repo
     (cfg.home.parent / "settings.json").write_text("{not json")

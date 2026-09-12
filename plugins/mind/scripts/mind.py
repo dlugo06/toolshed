@@ -1404,13 +1404,23 @@ def load_settings(cfg: Config) -> dict:
     return out
 
 
+_SETTINGS_TRUE = {"true", "1", "yes", "on"}
+_SETTINGS_FALSE = {"false", "0", "no", "off"}
+
+
 def cmd_settings(cfg: Config, sets: list[str]) -> str:
     current = load_settings(cfg)
     for item in sets:
         key, _, val = item.partition("=")
         if key not in DEFAULT_SETTINGS:
             raise ValidationError(f"unknown setting: {key}")
-        current[key] = val.strip().lower() in ("1", "true", "yes", "on")
+        normalized = val.strip().lower()
+        if normalized in _SETTINGS_TRUE:
+            current[key] = True
+        elif normalized in _SETTINGS_FALSE:
+            current[key] = False
+        else:
+            raise ValidationError(f"{key} must be true/false/1/0/yes/no/on/off, got {val!r}")
     if sets:
         SETTINGS_FILE(cfg).parent.mkdir(parents=True, exist_ok=True)
         SETTINGS_FILE(cfg).write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
