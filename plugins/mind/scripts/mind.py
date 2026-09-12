@@ -611,7 +611,7 @@ def cmd_ask(cfg: Config, terms: list[str], all_projects: bool, project: str | No
         if note.status != wanted:
             continue
         hay = (note.title + "\n" + note.body).lower()
-        hits = sum(1 for t in lowered if t in hay)
+        hits = sum(1 for t in lowered if re.search(rf"\b{re.escape(t)}\b", hay))
         if hits or not lowered:
             scored.append((-hits, prefix, note.id, prefix, note))
     if not scored:

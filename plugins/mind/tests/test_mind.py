@@ -947,6 +947,16 @@ def test_cmd_ask_ranks_by_terms_hit_and_scopes(repo, tmp_path):
     assert mind.cmd_ask(cfg, ["kubernetes"], False, None, False, work) == "mind: no note matches 'kubernetes'"
 
 
+def test_cmd_ask_word_boundary_matching_short_term_does_not_match_substring(repo, tmp_path):
+    """A two-letter term like 'pr' must not match inside 'process' or
+    'prefer': substring matching makes short queries far less selective."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Follow the review process closely", "We prefer a careful process.")
+    assert mind.cmd_ask(cfg, ["pr"], False, None, False, tmp_path) == "mind: no note matches 'pr'"
+    assert "PREF-REV-001" in mind.cmd_ask(cfg, ["process"], False, None, False, tmp_path)
+
+
 def test_cmd_ask_drafts_lists_only_drafts(repo, tmp_path):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
