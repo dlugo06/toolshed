@@ -296,7 +296,15 @@ def project_notes_dir(cfg: Config, slug: str) -> Path:
 
 
 def _slugify(name: str) -> str:
-    return name.lower().removesuffix(".git")
+    return re.sub(r"[^a-z0-9._-]+", "-", name.lower().removesuffix(".git")).strip("-.")
+
+
+_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+
+
+def _validate_slug(slug: str) -> None:
+    if not slug or slug in (".", "..") or not _SLUG_RE.fullmatch(slug):
+        raise ValidationError(f"invalid project slug: {slug!r}")
 
 
 def resolve_candidate(cfg: Config, cwd: Path) -> str:
@@ -438,7 +446,8 @@ def cmd_add(cfg: Config, draft: Path, scope: str, project: str | None, cwd: Path
     if scope == "global":
         notes_dir, scope_value, prefix = global_notes_dir(cfg), "global", ""
     else:
-        candidate = project or resolve_candidate(cfg, cwd)
+        candidate = _slugify(project) if project else resolve_candidate(cfg, cwd)
+        _validate_slug(candidate)
         slug = match_project(cfg, candidate) or candidate
         created_stub = _ensure_project(cfg, slug)
         notes_dir, scope_value, prefix = project_notes_dir(cfg, slug), f"project:{slug}", f"{slug}/"
@@ -510,7 +519,9 @@ def _scoped_notes(cfg: Config, all_projects: bool, project: str | None, cwd: Pat
     if all_projects:
         slugs = list_projects(cfg)
     else:
-        slug = match_project(cfg, project or resolve_candidate(cfg, cwd))
+        candidate = _slugify(project) if project else resolve_candidate(cfg, cwd)
+        _validate_slug(candidate)
+        slug = match_project(cfg, candidate)
         slugs = [slug] if slug else []
     for slug in slugs:
         rows += [(slug + "/", n) for n in load_notes(project_notes_dir(cfg, slug))]

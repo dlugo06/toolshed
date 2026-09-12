@@ -390,6 +390,41 @@ def test_cmd_add_global_assigns_id_and_pushes(repo, tmp_path):
     assert _git(["log", "--format=%s", "main"], bare).stdout.splitlines()[0] == "mind: add PRIN-TEST-001 Tests must assert concrete values"
 
 
+def test_cmd_add_sanitizes_slug_from_mind_project_no_path_traversal(repo, tmp_path):
+    """A hostile or accidental MIND_PROJECT must never escape home/projects/."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    cfg = dataclasses.replace(cfg, project="../../escaped")
+    draft = tmp_path / "d.md"
+    draft.write_text(DRAFT)
+    out = mind.cmd_add(cfg, draft, "project", None, tmp_path)
+    assert out == "mind: added escaped/PRIN-TEST-001 (project escaped), pushed; project.md is a stub, fill it in"
+    assert (cfg.home / "projects" / "escaped" / "project.md").is_file()
+    assert not (cfg.home.parent / "escaped").exists()
+
+
+def test_cmd_add_sanitizes_slash_in_explicit_project_flag(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    draft = tmp_path / "d.md"
+    draft.write_text(DRAFT)
+    out = mind.cmd_add(cfg, draft, "project", "a/b", tmp_path)
+    assert out == "mind: added a-b/PRIN-TEST-001 (project a-b), pushed; project.md is a stub, fill it in"
+    assert (cfg.home / "projects" / "a-b" / "project.md").is_file()
+    assert not (cfg.home / "projects" / "a").exists()
+
+
+def test_cmd_add_rejects_slug_that_sanitizes_to_empty(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    cfg = dataclasses.replace(cfg, project="..")
+    draft = tmp_path / "d.md"
+    draft.write_text(DRAFT)
+    with pytest.raises(mind.ValidationError, match="invalid project slug"):
+        mind.cmd_add(cfg, draft, "project", None, tmp_path)
+    assert [p for p in (cfg.home / "projects").iterdir() if p.is_dir()] == []
+
+
 def test_cmd_add_project_creates_stub(repo, tmp_path):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
