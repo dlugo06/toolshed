@@ -1313,6 +1313,27 @@ def test_ask_precedence_not_promoted_when_hits_do_not_share_a_stage(repo, tmp_pa
     assert "[precedence]" not in out
 
 
+def test_ask_precedence_promoted_via_refers_without_matching_query_text(repo, tmp_path):
+    """H4: a precedence note whose own title/body never says the query term
+    must still surface (and be tagged first) through `refers` alone, once
+    two of the notes it refers to share a stage and both hit the query."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Threads rule zero", "threads body")
+    _add(cfg, tmp_path, "Threads rule one", "threads body")
+    d = tmp_path / "p.md"
+    d.write_text("---\ntitle: When PREF-REV-001 conflicts with PREF-REV-002\ntype: precedence\nstage: review\n"
+                 "strength: should\nrefers: [PREF-REV-001, PREF-REV-002]\n---\n"
+                 "PREF-REV-001 wins on public repos.\n")
+    mind.cmd_add(cfg, d, "global", None, tmp_path)
+    out = mind.cmd_ask(cfg, ["threads"], False, None, False, tmp_path)
+    assert out.startswith(
+        "[precedence] PREC-REV-001 | When PREF-REV-001 conflicts with PREF-REV-002 | global | should\n"
+        "  PREF-REV-001 wins on public repos.\n")
+    assert "PREF-REV-001 | Threads rule zero" in out
+    assert "PREF-REV-002 | Threads rule one" in out
+
+
 def test_cmd_inject_prints_sections_in_order(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)

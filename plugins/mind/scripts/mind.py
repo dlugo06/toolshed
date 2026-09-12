@@ -1143,7 +1143,8 @@ def cmd_ask(cfg: Config, terms: list[str], all_projects: bool, project: str | No
             limit: int = 10, stage: str | None = None) -> str:
     wanted = "draft" if drafts else "accepted"
     lowered = [t.lower() for t in terms]
-    scored = []
+    others_scored: list[tuple] = []
+    precedence_all: list[tuple] = []
     for prefix, note in _scoped_notes(cfg, all_projects, project, cwd):
         if note.status != wanted:
             continue
@@ -1151,13 +1152,23 @@ def cmd_ask(cfg: Config, terms: list[str], all_projects: bool, project: str | No
             continue
         hay = (note.title + "\n" + note.body).lower()
         hits = sum(1 for t in lowered if re.search(rf"\b{re.escape(t)}\b", hay))
-        if hits or not lowered:
-            scored.append((-hits, prefix, note.id, prefix, note))
-    if not scored:
+        row = (-hits, prefix, note.id, prefix, note)
+        if note.meta.get("type") == "precedence":
+            # Collected regardless of its own hit count: a precedence note
+            # surfaces through `refers` (below) even when its title and body
+            # never say the query term, per the documented "When A conflicts
+            # with B" convention.
+            precedence_all.append(row)
+        elif hits or not lowered:
+            others_scored.append(row)
+
+    def _qualifies(row: tuple) -> bool:
+        return row[0] < 0 or not lowered
+
+    if not others_scored and not any(_qualifies(r) for r in precedence_all):
         return f"mind: no note matches '{' '.join(terms)}'"
-    ranked = sorted(scored, key=lambda r: (r[0], r[1], r[2]))
-    precedence = [r for r in ranked if r[4].meta.get("type") == "precedence"]
-    others = [r for r in ranked if r[4].meta.get("type") != "precedence"]
+    others = sorted(others_scored, key=lambda r: (r[0], r[1], r[2]))
+    precedence = sorted(precedence_all, key=lambda r: (r[0], r[1], r[2]))
     stage_counts: dict[str, int] = {}
     for r in others:
         stage_counts[r[4].stage] = stage_counts.get(r[4].stage, 0) + 1
@@ -1169,7 +1180,7 @@ def cmd_ask(cfg: Config, terms: list[str], all_projects: bool, project: str | No
         refers = r[4].meta.get("refers") or []
         if promote_ok and (matched_terms or (set(refers) & hit_ids)):
             promoted.append(r)
-        else:
+        elif _qualifies(r):
             remaining_precedence.append(r)
     out = [_ask_row(r[3], r[4], drafts, tag="[precedence] ") for r in promoted]
     rest = sorted(others + remaining_precedence, key=lambda r: (r[0], r[1], r[2]))
