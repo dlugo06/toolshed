@@ -1577,14 +1577,21 @@ def test_hook_end_to_end(repo, tmp_path):
 
 
 class FakeGh:
-    """Records argv; returns a PR URL for `pr create`, a JSON list for `pr list`."""
+    """Records argv; returns a PR URL for `pr create`, a JSON list for `pr list`.
+    Snapshots the --body-file content at call time into `last_body`, since
+    cmd_propose deletes its generated body file in its own `finally`, before
+    a caller sees the return value."""
     def __init__(self, existing=None):
         self.calls = []
         self.existing = existing or []
+        self.last_body = None
 
     def __call__(self, cfg, args, cwd, timeout=20):
         self.calls.append(args)
         if args[:2] == ["pr", "create"]:
+            if "--body-file" in args:
+                bf = Path(args[args.index("--body-file") + 1])
+                self.last_body = bf.read_text() if bf.exists() else None
             return subprocess.CompletedProcess(args, 0, "https://example.test/pr/7\n", "")
         if args[:2] == ["pr", "list"]:
             return subprocess.CompletedProcess(args, 0, json.dumps(self.existing), "")
@@ -1610,8 +1617,9 @@ def test_cmd_propose_branch_commits_pr_and_returns_to_main(repo, tmp_path, monke
     assert not list(mind.global_notes_dir(cfg).glob("PRIN-TEST-*.md"))   # main untouched
     create = [c for c in fake.calls if c[:2] == ["pr", "create"]][0]
     assert "--title" in create and create[create.index("--title") + 1] == "mind: Digest Run (2 notes)"
-    body = Path(create[create.index("--body-file") + 1]).read_text()
-    assert body.startswith("- PRIN-TEST-001 | Tests must assert concrete values | global | must\n  Assert exact values, never `is not None`.\n")
+    assert fake.last_body.startswith(
+        "- PRIN-TEST-001 | Tests must assert concrete values | global | must\n  Assert exact values, never `is not None`.\n")
+    assert not (cfg.home.parent / "proposal-digest-run.md").exists()   # M5: generated body file cleaned up
 
 
 def test_cmd_propose_without_gh(repo, tmp_path, monkeypatch):
@@ -1622,6 +1630,32 @@ def test_cmd_propose_without_gh(repo, tmp_path, monkeypatch):
     d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
     assert mind.cmd_propose(cfg, [d1], "x", "global", None, None, tmp_path) == \
         "mind: proposed 1 note on propose/2026-09-12-x, open the PR by hand"
+
+
+def test_cmd_propose_deletes_generated_body_file_after_success(repo, tmp_path, monkeypatch):
+    """M5: the auto-generated `proposal-<topic>.md` body file (left in
+    cfg.home.parent for `gh pr create --body-file`) must not linger once the
+    command is done, when the caller never supplied its own --body file."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert not (cfg.home.parent / "proposal-x.md").exists()
+
+
+def test_cmd_propose_keeps_caller_supplied_body_file(repo, tmp_path, monkeypatch):
+    """A caller-supplied --body file is never deleted: only the one this
+    command generated itself."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    body = tmp_path / "custom-body.md"; body.write_text("custom\n")
+    mind.cmd_propose(cfg, [d], "x", "global", None, body, tmp_path)
+    assert body.exists()
 
 
 def test_cmd_propose_rejects_batch_on_invalid_draft(repo, tmp_path, monkeypatch):
@@ -1992,6 +2026,19 @@ def test_capture_writes_one_json_line(repo, tmp_path):
     assert row["ts"].endswith("Z") and len(row["ts"]) == 20
 
 
+def test_capture_masks_credential_shapes_in_prompt(repo, tmp_path):
+    """M5: a prompt carrying a pasted credential must never sit in clear
+    text in the pending file, which nothing else ever scrubs."""
+    cfg, _, _ = repo
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    token = "ghp_" + "a" * 36
+    proc = _capture(env, {"session_id": "s1", "prompt": f"use this token {token} to auth", "cwd": str(tmp_path)}, tmp_path)
+    assert proc.returncode == 0
+    row = json.loads((cfg.home.parent / "pending.jsonl").read_text().splitlines()[0])
+    assert token not in row["prompt"]
+    assert "use this token *** to auth" == row["prompt"]
+
+
 def test_capture_skips_slash_and_short_and_is_inert_without_repo(repo, tmp_path):
     cfg, _, _ = repo
     env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
@@ -2023,6 +2070,30 @@ def test_read_and_mark_pending(repo):
     assert (cfg.home.parent / "pending.jsonl.processed").read_text() == "2026-09-12T10:00:00Z\n"
     assert [r["prompt"] for r in mind.read_pending(cfg, None, 200)] == ["two"]
     assert mind.read_pending(cfg, "2026-09-12T11:00:00Z", 200) == []
+
+
+def test_clear_pending_truncates_file_and_keeps_watermark(repo):
+    """M5: `pending --clear` empties the captured-prompt file (which can
+    carry pasted secrets) without touching the watermark, so the digest
+    skill can purge it after marking."""
+    cfg, _, _ = repo
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.write_text('{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n')
+    mind.mark_pending(cfg, "2026-09-12T10:00:00Z")
+    mind.clear_pending(cfg)
+    assert pending.read_text() == ""
+    assert (cfg.home.parent / "pending.jsonl.processed").read_text() == "2026-09-12T10:00:00Z\n"
+
+
+def test_main_pending_clear_reports_and_truncates(repo, capsys):
+    cfg, _, _ = repo
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    pending.write_text('{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n')
+    rc = mind.main(["pending", "--clear"], env={"MIND_REPO": cfg.repo, "MIND_HOME": str(cfg.home)}, cwd=cfg.home)
+    assert rc == 0
+    assert capsys.readouterr().out == "mind: pending cleared\n"
+    assert pending.read_text() == ""
 
 
 def test_capture_ignores_malformed_json_stdin(repo, tmp_path):

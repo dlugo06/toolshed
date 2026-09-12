@@ -284,6 +284,24 @@ def _redact(text: str, cfg: Config | None = None) -> str:
     return text
 
 
+_CREDENTIAL_SHAPE_RES = [
+    re.compile(r"ghp_[A-Za-z0-9]{36}"),
+    re.compile(r"sk-ant-[A-Za-z0-9_-]+"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
+]
+
+
+def _mask_credential_shapes(text: str) -> str:
+    """A captured prompt can carry a pasted secret with nothing else ever
+    scrubbing it out of the pending file: mask the common credential shapes
+    before writing, same URL pattern `_redact` uses for git/gh output."""
+    text = _CREDENTIAL_URL_RE.sub("://***@", text)
+    for pattern in _CREDENTIAL_SHAPE_RES:
+        text = pattern.sub("***", text)
+    return text
+
+
 def _is_valid_git_dir(cfg: Config) -> bool:
     """True for a structurally sound repo, even one with no commits yet (a
     freshly cloned brand-new empty data repo)."""
@@ -883,6 +901,10 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
             url = created.stdout.strip().splitlines()[-1]
         return f"mind: proposed {n} {noun} on {branch}, PR {_redact(url, cfg)}"
     finally:
+        if body is None:
+            # Only the body file this call generated itself, never one the
+            # caller supplied with --body.
+            (cfg.home.parent / f"proposal-{topic_slug}.md").unlink(missing_ok=True)
         git(cfg, ["worktree", "remove", "--force", "--", str(wt)], cfg.home, 20)
         git(cfg, ["worktree", "prune"], cfg.home, 10)
 
@@ -953,7 +975,8 @@ def cmd_capture(cfg: Config, payload: dict, cwd: Path) -> None:
         path.write_text("".join(lines[len(lines) // 2:]), encoding="utf-8")
     cwd_str = str(payload.get("cwd") or cwd)
     row = {"ts": _utc_now(), "session": str(payload.get("session_id") or ""),
-           "project": resolve_candidate(cfg, Path(cwd_str)), "cwd": cwd_str, "prompt": prompt}
+           "project": resolve_candidate(cfg, Path(cwd_str)), "cwd": cwd_str,
+           "prompt": _mask_credential_shapes(prompt)}
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
@@ -982,6 +1005,15 @@ def read_pending(cfg: Config, since: str | None, limit: int) -> list[dict]:
 
 def mark_pending(cfg: Config, ts: str) -> None:
     _watermark_file(cfg).write_text(ts + "\n", encoding="utf-8")
+
+
+def clear_pending(cfg: Config) -> None:
+    """Truncate the captured-prompt file (which can carry pasted secrets)
+    while keeping the watermark, so a digest run can purge it after marking
+    without losing where the next run should resume from."""
+    path = PENDING_FILE(cfg)
+    if path.exists():
+        path.write_text("", encoding="utf-8")
 
 
 def _scoped_notes(cfg: Config, all_projects: bool, project: str | None, cwd: Path) -> list[tuple[str, Note]]:
@@ -1483,6 +1515,7 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--since")
     pe.add_argument("--limit", type=int, default=200)
     pe.add_argument("--mark")
+    pe.add_argument("--clear", action="store_true")
     st = sub.add_parser("stale")
     st.add_argument("--days", type=int, default=90)
     st.add_argument("--all", action="store_true")
@@ -1577,6 +1610,9 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
             if args.mark:
                 mark_pending(cfg, args.mark)
                 msg = f"mind: pending marked at {args.mark}"
+            elif args.clear:
+                clear_pending(cfg)
+                msg = "mind: pending cleared"
             else:
                 rows = read_pending(cfg, args.since, args.limit)
                 for row in rows:
