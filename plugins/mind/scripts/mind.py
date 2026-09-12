@@ -282,6 +282,11 @@ def _rebase_onto_upstream(cfg: Config) -> str | None:
 
 
 def sync(cfg: Config, pull_only: bool = False) -> str | None:
+    status = git(cfg, ["status", "--porcelain"], cfg.home, 10)
+    if status.stdout.strip():
+        # A hand-edited file (e.g. the remember skill's project.md stub
+        # fill-in): commit it first, or the pull --rebase below refuses.
+        _require_commit(commit_all(cfg, "mind: manual edits"))
     if _has_upstream(cfg):
         if _ahead(cfg):
             msg = _rebase_onto_upstream(cfg)

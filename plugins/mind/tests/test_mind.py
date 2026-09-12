@@ -202,6 +202,20 @@ def test_cmd_init_against_empty_bare_repo_pushes_and_sets_upstream(tmp_path):
     assert log == ["mind: init"]
 
 
+def test_sync_commits_dirty_tree_before_pulling_or_pushing(repo):
+    """The remember skill tells the agent to hand-edit project.md and then
+    just run sync: sync must commit that edit itself, or the next pull
+    --rebase anywhere refuses with a dirty working tree."""
+    cfg, bare, _ = repo
+    (cfg.home / "manual.md").write_text("edited by hand\n")
+    assert mind.sync(cfg) is None
+    log = _git(["log", "--format=%s"], cfg.home).stdout.splitlines()
+    assert log[0] == "mind: manual edits"
+    assert _git(["log", "--format=%s", "main"], bare).stdout.splitlines()[0] == "mind: manual edits"
+    status = _git(["status", "--porcelain"], cfg.home).stdout
+    assert status == ""
+
+
 def test_sync_pushes_local_commits_and_retries_once(repo):
     cfg, bare, seed = repo
     (cfg.home / "a.md").write_text("a\n")
