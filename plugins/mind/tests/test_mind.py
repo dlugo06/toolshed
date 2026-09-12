@@ -1686,6 +1686,21 @@ def test_cmd_propose_rejects_batch_on_invalid_draft(repo, tmp_path, monkeypatch)
     assert _git(["branch", "--list", "propose/*"], cfg.home).stdout == ""
 
 
+def test_cmd_propose_rejects_unrecognised_draft_scope_value(repo, tmp_path, monkeypatch):
+    """L: an unrecognised `scope:` value in a draft's frontmatter (e.g.
+    "acme") must be rejected, not silently fall back to the command's own
+    --scope/--project flags."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    d = tmp_path / "a.md"
+    d.write_text("---\ntitle: X\ntype: preference\nstage: review\nstrength: should\nscope: acme\n---\nbody\n")
+    with pytest.raises(mind.ValidationError, match="a.md: unrecognised scope: 'acme'"):
+        mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert not list(cfg.home.parent.glob("worktree-*"))
+    assert _git(["branch", "--list", "propose/*"], cfg.home).stdout == ""
+
+
 def test_cmd_propose_supersedes_flips_old_note_in_branch(repo, tmp_path, monkeypatch):
     cfg, bare, _ = repo
     mind.cmd_init(cfg)
