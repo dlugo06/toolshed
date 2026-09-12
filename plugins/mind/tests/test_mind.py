@@ -466,7 +466,7 @@ def test_ensure_checkout_reports_failure_for_nonempty_home_without_git(repo):
     assert (home / "stray.txt").is_file()  # left untouched, not half-populated
 
 
-def _write_project(cfg, slug, aliases=(), stack=("python",), body="Quotes from chat messages. Second sentence."):
+def _write_project(cfg, slug, aliases=(), stack=("go", "postgres"), body="Backend API service. Second sentence."):
     d = cfg.home / "projects" / slug
     (d / "notes").mkdir(parents=True, exist_ok=True)
     meta = {"slug": slug, "name": slug.title(), "repo": f"git@example.com:o/{slug}.git",
@@ -491,9 +491,9 @@ def test_resolve_candidate_prefers_env_then_origin_then_dirs(tmp_path, repo):
 
 def test_match_project_by_slug_and_alias(repo):
     cfg, _, _ = repo
-    _write_project(cfg, "erp-quotes", aliases=("quotes-old", "/x/quotes"))
-    assert mind.match_project(cfg, "erp-quotes") == "erp-quotes"
-    assert mind.match_project(cfg, "quotes-old") == "erp-quotes"
+    _write_project(cfg, "acme-api", aliases=("acme-api-old", "acme-backend"))
+    assert mind.match_project(cfg, "acme-api") == "acme-api"
+    assert mind.match_project(cfg, "acme-api-old") == "acme-api"
     assert mind.match_project(cfg, "nothing") is None
 
 
@@ -507,7 +507,7 @@ def test_next_id_per_scope(repo):
     assert mind.next_id(g, "gotcha", "deployment") == "GOT-DEPLOY-001"
     (g / "PREF-REV-abc-z.md").write_text(mind.render_frontmatter({"id": "PREF-REV-abc", "title": "z", "type": "preference", "stage": "review", "strength": "must"}, "z\n"))
     assert mind.next_id(g, "preference", "review") == "PREF-REV-008"  # hand-edited id is skipped, never crashes
-    p = mind.project_notes_dir(cfg, "erp-quotes"); p.mkdir(parents=True)
+    p = mind.project_notes_dir(cfg, "acme-api"); p.mkdir(parents=True)
     assert mind.next_id(p, "preference", "review") == "PREF-REV-001"
 
 
@@ -558,17 +558,17 @@ def test_priority_order_keeps_must_first_then_round_robins_stages():
 
 def test_build_projects_index_and_reindex(repo):
     cfg, _, _ = repo
-    _write_project(cfg, "erp-quotes")
+    _write_project(cfg, "acme-api")
     _write_project(cfg, "alpha", stack=("go",), body="Alpha thing.")
     mind.global_notes_dir(cfg).mkdir(parents=True)
     mind.reindex(cfg)
     assert (cfg.home / "projects" / "index.md").read_text() == (
         "# Projects\n\n"
+        "- acme-api | Acme-Api | go, postgres | Backend API service.\n"
         "- alpha | Alpha | go | Alpha thing.\n"
-        "- erp-quotes | Erp-Quotes | python | Quotes from chat messages.\n"
     )
     assert (cfg.home / "global" / "index.md").read_text() == "# Global\n"
-    assert (cfg.home / "projects" / "erp-quotes" / "index.md").read_text() == "# erp-quotes\n"
+    assert (cfg.home / "projects" / "acme-api" / "index.md").read_text() == "# acme-api\n"
 
 
 DRAFT = """---
@@ -760,8 +760,10 @@ def test_cmd_add_reports_push_failure_but_keeps_commit(repo, tmp_path, monkeypat
     assert _git(["log", "-1", "--format=%s"], cfg.home).stdout.strip() == "mind: add PRIN-TEST-001 Tests must assert concrete values"
 
 
-def test_cmd_add_renames_on_duplicate_id_from_remote(repo, tmp_path, seed_note):
-    """Two machines add PRIN-TEST-001 at once: the loser gets 002."""
+def test_cmd_add_pulls_before_assigning_id(repo, tmp_path, seed_note):
+    """Another machine already pushed PRIN-TEST-001 before this add starts.
+    The pre-write pull brings that note down before next_id() is computed,
+    so this machine is assigned 002 directly — no collision or rename."""
     cfg, bare, seed = repo
     mind.cmd_init(cfg)
     seed_note(seed, "global/notes/PRIN-TEST-001-other.md", "PRIN-TEST-001", "Other")   # pushed by the other machine
