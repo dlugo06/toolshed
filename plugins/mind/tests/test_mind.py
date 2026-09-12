@@ -1,6 +1,7 @@
 """Tests for the mind plugin script (scripts/mind.py) and its hook."""
 import dataclasses
 import datetime as dt
+import json
 import os
 import subprocess
 import sys
@@ -471,3 +472,99 @@ def test_cmd_ask_drafts_lists_only_drafts(repo, tmp_path):
     _add(cfg, tmp_path, "Accepted one", "a")
     _add(cfg, tmp_path, "Draft one", "d", status="draft")
     assert mind.cmd_ask(cfg, [], False, None, True, tmp_path) == "PREF-REV-002 | Draft one | global | should | draft\n  d\n"
+
+
+def test_cmd_inject_prints_sections_in_order(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Global rule", "g")
+    work = tmp_path / "proj-a"
+    work.mkdir()
+    _add(cfg, tmp_path, "Project rule", "p", scope="project", cwd=work)
+    _add(cfg, tmp_path, "A draft", "d", status="draft")
+    out = mind.cmd_inject(cfg, "startup", work)
+    assert out == (
+        mind.PROTOCOL.format(home=cfg.home)
+        + "\n# Global\n\n## review\n- PREF-REV-001 | Global rule | should\n"
+        + "\n# proj-a\n\n## review\n- PREF-REV-001 | Project rule | should\n"
+        + "\n# Projects\n\n- proj-a | proj-a |  | Describe the project: purpose, kind of work, repo URL.\n"
+        + "\n1 draft note awaits acceptance: run /mind:ask --drafts\n"
+    )
+
+
+def test_cmd_inject_without_project(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    nowhere = tmp_path / "Nowhere"
+    nowhere.mkdir()
+    out = mind.cmd_inject(cfg, "startup", nowhere)
+    assert "\nno notes for nowhere yet\n" in out
+    assert out.endswith("\n# Projects\n")
+
+
+def test_cmd_inject_compact_makes_no_network_call(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "pull", lambda c: pytest.fail("pull called on compact"))
+    mind.cmd_inject(cfg, "compact", tmp_path)
+
+
+def test_cmd_inject_offline_line(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "pull", lambda c: "mind: offline, using cached copy from 2026-09-12")
+    out = mind.cmd_inject(cfg, "resume", tmp_path)
+    assert out.startswith("mind: offline, using cached copy from 2026-09-12\n")
+
+
+def test_cmd_inject_truncates_global_first(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "INDEX_BUDGET", 300)
+    for i in range(8):
+        _add(cfg, tmp_path, f"Global rule number {i} with a long enough title to fill", "g")
+    work = tmp_path / "proj-a"
+    work.mkdir()
+    _add(cfg, tmp_path, "Project rule", "p", scope="project", cwd=work)
+    out = mind.cmd_inject(cfg, "clear", work)
+    assert "+" in out and "more, run /mind:ask <topic>" in out
+    assert "- PREF-REV-001 | Project rule | should" in out          # project index intact
+    assert "- proj-a | proj-a |" in out                               # projects index intact
+    assert "Global rule number 7" not in out
+
+
+def test_cmd_inject_index_budget_of_10_still_prints_projects_index(repo, tmp_path, monkeypatch):
+    """A degenerate INDEX_BUDGET smaller than the projects index alone must
+    still terminate (not raise or hang) and must never truncate the projects
+    index, per the spec's 'never truncate projects' rule."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "INDEX_BUDGET", 10)
+    for i in range(5):
+        _add(cfg, tmp_path, f"Global rule number {i} with a long enough title to fill", "g")
+    work = tmp_path / "proj-a"
+    work.mkdir()
+    _add(cfg, tmp_path, "Project rule", "p", scope="project", cwd=work)
+    out = mind.cmd_inject(cfg, "startup", work)
+    assert "\n# Projects\n\n- proj-a | proj-a |  | Describe the project: purpose, kind of work, repo URL.\n" in out
+
+
+def test_main_inject_never_fails_the_hook(repo, tmp_path, monkeypatch, capsys):
+    cfg, _, _ = repo
+    monkeypatch.setattr(mind, "cmd_inject", lambda c, e, w: (_ for _ in ()).throw(RuntimeError("boom")))
+    env = {"MIND_REPO": cfg.repo, "MIND_HOME": str(cfg.home)}
+    assert mind.main(["inject", "--event", "startup"], env=env, cwd=tmp_path) == 0
+    assert capsys.readouterr().out == "mind: inject failed, boom\n"
+
+
+def test_hook_end_to_end(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Global rule", "g")
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    proc = subprocess.run(
+        ["sh", str(PLUGIN / "scripts" / "session-start.sh")],
+        env=env, input=json.dumps({"source": "startup"}), capture_output=True, text=True, cwd=tmp_path,
+    )
+    assert proc.returncode == 0
+    assert "- PREF-REV-001 | Global rule | should" in proc.stdout

@@ -465,6 +465,76 @@ def cmd_ask(cfg: Config, terms: list[str], all_projects: bool, project: str | No
     return "".join(out)
 
 
+INDEX_BUDGET = 4000
+PROTOCOL = (
+    "Mind: the owner's preferences. Notes at `{home}`. Before asking the owner a "
+    "question, run `/mind:ask <topic>`. If a note answers it, apply it and cite the ID. "
+    "If none does, ask once, then `/mind:remember` the answer: universal facts go to "
+    "global, facts about this repo go to the project. When this project is silent, look "
+    "in related projects' notes. If two notes conflict, surface both IDs and ask. The "
+    "project's own `CLAUDE.md` wins over any note. Save memories through "
+    "`/mind:remember`, not the auto-memory directory.\n"
+)
+
+
+def _truncate(section: str, keep: int) -> str:
+    """Keep the heading and the first `keep` note rows; say how many were cut."""
+    lines = section.splitlines(keepends=True)
+    rows = [i for i, l in enumerate(lines) if l.startswith("- ")]
+    if keep >= len(rows):
+        return section
+    cut = len(rows) - keep
+    last = rows[keep - 1] + 1 if keep > 0 else rows[0]
+    return "".join(lines[:last]) + f"+{cut} more, run /mind:ask <topic>\n"
+
+
+def _fit(global_idx: str, project_idx: str, projects_idx: str) -> tuple[str, str]:
+    budget = INDEX_BUDGET - len(projects_idx)
+    total = len(global_idx) + len(project_idx)
+    if total <= budget:
+        return global_idx, project_idx
+    # Shrink global row by row, then project.
+    for idx_name in ("global", "project"):
+        cur = global_idx if idx_name == "global" else project_idx
+        rows = sum(1 for l in cur.splitlines() if l.startswith("- "))
+        while rows > 0 and len(global_idx) + len(project_idx) > budget:
+            rows -= 1
+            cur = _truncate(cur, rows)
+            if idx_name == "global":
+                global_idx = cur
+            else:
+                project_idx = cur
+        if len(global_idx) + len(project_idx) <= budget:
+            break
+    return global_idx, project_idx
+
+
+def _draft_count(cfg: Config) -> int:
+    dirs = [global_notes_dir(cfg)] + [project_notes_dir(cfg, s) for s in list_projects(cfg)]
+    return sum(1 for d in dirs for n in load_notes(d) if n.status == "draft")
+
+
+def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
+    out = []
+    if event in ("startup", "resume"):
+        msg = pull(cfg)
+        if msg:
+            out.append(msg + "\n")
+    out.append(PROTOCOL.format(home=cfg.home))
+    global_idx = (cfg.home / "global" / "index.md").read_text() if (cfg.home / "global" / "index.md").is_file() else "# Global\n"
+    candidate = resolve_candidate(cfg, cwd)
+    slug = match_project(cfg, candidate)
+    project_idx = (cfg.home / "projects" / slug / "index.md").read_text() if slug else f"no notes for {candidate} yet\n"
+    projects_idx = (cfg.home / "projects" / "index.md").read_text() if (cfg.home / "projects" / "index.md").is_file() else "# Projects\n"
+    global_idx, project_idx = _fit(global_idx, project_idx, projects_idx)
+    out += ["\n" + global_idx, "\n" + project_idx, "\n" + projects_idx]
+    drafts = _draft_count(cfg)
+    if drafts:
+        noun = "note awaits" if drafts == 1 else "notes await"
+        out.append(f"\n{drafts} draft {noun} acceptance: run /mind:ask --drafts\n")
+    return "".join(out)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mind.py", add_help=True)
     sub = p.add_subparsers(dest="cmd")
@@ -501,6 +571,14 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
     except ConfigError as exc:
         print(f"mind: {exc}", file=sys.stderr)
         return 1
+    if args.cmd == "inject":
+        try:
+            msg = ensure_checkout(cfg) or cmd_inject(cfg, args.event, cwd)
+        except Exception as exc:
+            print(f"mind: inject failed, {exc}")
+            return 0
+        print(msg)
+        return 0
     try:
         if args.cmd == "init":
             msg = ensure_checkout(cfg) or cmd_init(cfg)
