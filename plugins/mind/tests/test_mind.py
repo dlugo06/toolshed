@@ -187,6 +187,20 @@ def test_pull_offline_falls_back(repo, monkeypatch):
     assert msg.startswith("mind: offline, using cached copy from ")
 
 
+def test_cmd_init_against_empty_bare_repo_pushes_and_sets_upstream(tmp_path):
+    """The documented first-run path: an empty data repo has no upstream
+    branch yet. init must still push, not report offline forever."""
+    bare = tmp_path / "remote.git"
+    _git(["init", "--bare", "-q", "--initial-branch=main", str(bare)], tmp_path)
+    home = tmp_path / "home"
+    env = {"MIND_REPO": str(bare), "MIND_HOME": str(home)}
+    cfg = mind.Config.from_env(env, tmp_path)
+    assert mind.ensure_checkout(cfg) is None
+    assert mind.cmd_init(cfg) == "mind: initialised global/ and projects/"
+    log = _git(["log", "--format=%s", "main"], bare).stdout.splitlines()
+    assert log == ["mind: init"]
+
+
 def test_sync_pushes_local_commits_and_retries_once(repo):
     cfg, bare, seed = repo
     (cfg.home / "a.md").write_text("a\n")

@@ -189,14 +189,29 @@ def commit_all(cfg: Config, message: str) -> None:
     git(cfg, ["commit", "-q", "-m", message], cfg.home, 10)
 
 
+def _has_upstream(cfg: Config) -> bool:
+    proc = git(cfg, ["rev-parse", "--abbrev-ref", "@{u}"], cfg.home, 5)
+    return proc.returncode == 0
+
+
+def _has_head(cfg: Config) -> bool:
+    proc = git(cfg, ["rev-parse", "--verify", "-q", "HEAD"], cfg.home, 5)
+    return proc.returncode == 0
+
+
 def _ahead(cfg: Config) -> bool:
+    if not _has_upstream(cfg):
+        # No upstream yet (e.g. a brand-new empty data repo): anything
+        # committed locally is unpushed work, so treat it as ahead.
+        return _has_head(cfg)
     proc = git(cfg, ["rev-list", "--count", "@{u}..HEAD"], cfg.home, 5)
     return proc.returncode == 0 and proc.stdout.strip() not in ("", "0")
 
 
 def push(cfg: Config) -> str | None:
+    args = ["push", "-q"] if _has_upstream(cfg) else ["push", "-q", "-u", "origin", "HEAD"]
     try:
-        proc = git(cfg, ["push", "-q"], cfg.home, GIT_TIMEOUTS["push"])
+        proc = git(cfg, args, cfg.home, GIT_TIMEOUTS["push"])
     except subprocess.TimeoutExpired:
         return "mind: push failed, note is committed locally; it will push on the next remember or session start"
     if proc.returncode != 0:
@@ -205,18 +220,19 @@ def push(cfg: Config) -> str | None:
 
 
 def sync(cfg: Config, pull_only: bool = False) -> str | None:
-    if _ahead(cfg):
-        try:
-            proc = git(cfg, ["pull", "-q", "--rebase"], cfg.home, GIT_TIMEOUTS["pull"])
-        except subprocess.TimeoutExpired:
-            proc = None
-        if proc is None or proc.returncode != 0:
-            git(cfg, ["rebase", "--abort"], cfg.home, 5)
-            return f"mind: offline, using cached copy from {_head_date(cfg)}"
-    else:
-        msg = pull(cfg)
-        if msg:
-            return msg
+    if _has_upstream(cfg):
+        if _ahead(cfg):
+            try:
+                proc = git(cfg, ["pull", "-q", "--rebase"], cfg.home, GIT_TIMEOUTS["pull"])
+            except subprocess.TimeoutExpired:
+                proc = None
+            if proc is None or proc.returncode != 0:
+                git(cfg, ["rebase", "--abort"], cfg.home, 5)
+                return f"mind: offline, using cached copy from {_head_date(cfg)}"
+        else:
+            msg = pull(cfg)
+            if msg:
+                return msg
     if pull_only or not _ahead(cfg):
         return None
     msg = push(cfg)
