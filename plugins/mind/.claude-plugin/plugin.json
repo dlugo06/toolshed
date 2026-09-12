@@ -1,11 +1,8 @@
 {
   "name": "mind",
-  "version": "0.0.1",
-  "description": "Owner preference and decision store injected at session start. Placeholder; not yet built.",
-  "author": {
-    "name": "dlugo06",
-    "url": "https://github.com/dlugo06"
-  },
+  "version": "0.1.0",
+  "description": "Owner preference and decision store: a private notes repo pulled and injected at session start, with remember and ask skills.",
+  "author": { "name": "dlugo06", "url": "https://github.com/dlugo06" },
   "license": "MIT",
-  "keywords": ["preferences", "memory", "placeholder"]
+  "keywords": ["preferences", "memory", "notes", "cross-project"]
 }
