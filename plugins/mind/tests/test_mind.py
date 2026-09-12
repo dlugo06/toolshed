@@ -198,6 +198,24 @@ def test_git_builds_environment_from_cfg_env_not_os_environ(repo):
     assert author == "custom-author"
 
 
+def test_ensure_checkout_clone_uses_dash_dash_before_repo_url(repo, monkeypatch):
+    """A MIND_REPO beginning with '-' must never be parsed as a git option."""
+    cfg, _, _ = repo
+    captured = {}
+    real_git = mind.git
+
+    def spy(c, args, cwd, timeout):
+        if args and args[0] == "clone":
+            captured["args"] = args
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", spy)
+    home2 = cfg.home.parent / "second"
+    cfg2 = dataclasses.replace(cfg, home=home2)
+    assert mind.ensure_checkout(cfg2) is None
+    assert captured["args"] == ["clone", "-q", "--", cfg.repo, str(home2)]
+
+
 def test_ensure_checkout_clones_once(repo):
     cfg, bare, _ = repo
     assert (cfg.home / "schema.md").read_text() == "# schema\n"

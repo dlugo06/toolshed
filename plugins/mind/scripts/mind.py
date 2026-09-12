@@ -204,7 +204,7 @@ def ensure_checkout(cfg: Config) -> str | None:
         return None
     cfg.home.parent.mkdir(parents=True, exist_ok=True)
     try:
-        proc = git(cfg, ["clone", "-q", cfg.repo, str(cfg.home)], cfg.home.parent, GIT_TIMEOUTS["clone"])
+        proc = git(cfg, ["clone", "-q", "--", cfg.repo, str(cfg.home)], cfg.home.parent, GIT_TIMEOUTS["clone"])
     except subprocess.TimeoutExpired:
         return "mind: clone failed, timed out"
     if proc.returncode != 0:
