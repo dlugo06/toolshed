@@ -302,6 +302,14 @@ def test_main_exit_codes_and_json(root: Path, capsys, monkeypatch):
     assert [r["id"] for r in payload["alpha"]["in_flight"]] == ["P5-001", "P5-015"]
 
 
+def test_brief_has_no_mind_section(root, monkeypatch, capsys):
+    monkeypatch.setenv("TOOLSHED_PROJECTS_ROOT", str(root))
+    monkeypatch.setenv("TOOLSHED_PHASES_ROOT", PHASES)
+    assert main(["--brief"]) == 0
+    out = capsys.readouterr().out
+    assert "Mind:" not in out and "mind.py" not in out
+
+
 class _SyncRun:
     """Stand-in for subprocess.run answering `git rev-list --left-right --count`."""
 

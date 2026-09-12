@@ -30,6 +30,29 @@ git -C <project> status --short
 
 If a project section starts with `DUPLICATE IDS`, stop for that project. Report the IDs and ask the owner to renumber; stages keyed by ID cannot be trusted until then.
 
+## Consult the mind
+
+The `mind` plugin (installed side by side: `MIND="$(dirname "$CLAUDE_PLUGIN_ROOT")/mind/scripts/mind.py"`) holds the owner's stated preferences. When the file is absent, every consult below is skipped and the report says `Mind: not installed`; nothing else changes.
+
+The rule for every ruling the orchestrator makes on the owner's behalf: **decide, cite, or propose**.
+
+- Before deciding, run `python3 "$MIND" ask <terms>` with the terms in the table below. A note that settles the matter is applied and cited as `[per <ID>]` on the ruling line.
+- With no settling note, decide anyway and mark the ruling `[provisional]`.
+- At the end of the transition, every provisional ruling becomes a note (schema rules; scope by "true in another repository"; `source: orchestrator ruling <project>/<item> <date>`) delivered in one pull request on the data repo: `python3 "$MIND" propose <drafts...> --topic <project>-<item>-<stage>`. The PR URL goes on the progress line and in the report.
+- A statement the owner makes during the run ("from now on", "never", "always", a direct answer) is not provisional: it goes through `python3 "$MIND" add` at once and is cited from then on.
+- A ruling that would change the effect of a `must` note is never made provisionally. Apply the note; if it seems wrong, record `blocked_reason` and stop. Only `should`, `default`, and unstated matters may be ruled provisionally.
+
+| transition | ask terms | what the answer governs |
+|---|---|---|
+| idea -> specced | `tier <subsystem words>`; `decision <subsystem words>` | the tier; prior decisions the spec must honour |
+| impact_checked -> tests_planned | `scenario defensive critical` | rulings on test-plan flags |
+| tests_planned -> implementing | `implementer brief tests` | brief wording and the test bound |
+| implementing -> evaluated | `review ruling <finding words>` | rulings on whole-branch and review-tests findings |
+| evaluated -> shipped | `ship tier reviewers` | the ship tier |
+| shipped -> review_processed | `process-review etiquette`; `<finding words>` | decision-table rulings |
+
+Open proposals are listed by `python3 "$MIND" proposals`; the orchestrator never merges one.
+
 ## Units of work
 
 A unit is one item in a phase file. The orchestrator keeps its state on the item itself:
@@ -45,7 +68,7 @@ A unit is one item in a phase file. The orchestrator keeps its state on the item
 | `updated` | orchestrator | ISO date of the last change |
 | `passes` | owner only | complete: merged, deployed, verified |
 
-The phase progress file (`*.progress.md` next to the phase file, if the project keeps one) is the human log. Append one line per transition. Rulings the orchestrator makes on the owner's behalf (a plan defect resolved, a review finding rejected) go on that line with the reason; there is no second ledger.
+The phase progress file (`*.progress.md` next to the phase file, if the project keeps one) is the human log. Append one line per transition. Rulings the orchestrator makes on the owner's behalf (a plan defect resolved, a review finding rejected) go on that line with the reason; there is no second ledger. Each ruling ends with `[per <ID>]` or `[provisional]`; a transition that produced provisional rulings ends its line with `proposal: <PR url>`.
 
 When the owner asks for a session retro log, it lives in the project's scratch docs directory (`.dev/SESSION_NOTES_<date>.md`), not in the progress file: numbered observations as they happen, a per-agent ledger (agent, model, purpose, tokens, tool uses, minutes, one-line verdict), the item totals against the tier guideline, and a ranked improvement list at the end. The ledger row is filled from each completion notice before the next dispatch. Two items' records on two branches both edit the phase file and the progress file, so the later merge has a trivial docs conflict; keep both records.
 
@@ -200,7 +223,7 @@ For every open item in a project propose one of `keep`, `fold: <target>`, `defer
 ## Guardrails
 
 - Never set `passes`, never merge, never approve a PR, never commit to the default branch, never push outside `/dev-kit:ship`.
-- Before asking the owner anything, consult the `mind` plugin if installed, then the project's auto-memory and `CLAUDE.md`. If the answer is there, apply it and cite the source. If not, ask once, then record the answer.
+- Before asking the owner anything, follow §Consult the mind, then the project's `CLAUDE.md`. If the answer is there, apply and cite it. If not, ask once, then `add` the answer.
 - Brainstorming and spec writing are interactive; run them in the main session, never in a subagent.
 - Subagent prompts are short: a brief file path, one line on where the task fits, the report path, and the report contract. Plans are checklists, not fixtures. Never paste prior-task history into a dispatch.
 - Input contract for every dispatch (this is the token budget's only enforcement point): the brief is under 150 words; it names ONE plan or brief path, ONE report path to write, and the path of the previous stage's report to read; it never lists spec + plan + test plan + impact report together (the plan already summarises them). Agents read the diff or plan once, read full files only for the functions they touch, and end their report with one line naming what they did not read.
@@ -230,6 +253,8 @@ Tier: <fix|standard|full> — <why>. Agents: <used>/<cap>.
 Transition: <from> -> <to> (<skill or agent>, <model>)
 Recorded: <phase file> <id> stage=<to>
 Rulings: <one line each, or none>
+Mind: consulted <IDs or none | not installed>
+Proposals: <PR url or none>
 Blocked / needs owner: <ids and why, or none>
 Next invocation would: <one line>
 ```
