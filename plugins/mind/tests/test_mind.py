@@ -416,6 +416,44 @@ def test_cmd_add_rejects_invalid_frontmatter(repo, tmp_path):
     assert list(mind.global_notes_dir(cfg).glob("*.md")) == []
 
 
+def test_cmd_add_raises_on_commit_failure_and_keeps_earlier_unpushed_commit(repo, tmp_path, monkeypatch):
+    """commit_all must surface a failed `git commit` rather than silently
+    continuing as if the note were committed, and a failure must never touch
+    an earlier commit that is itself still unpushed."""
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    (cfg.home / "earlier.md").write_text("earlier\n")
+    mind.commit_all(cfg, "mind: earlier unpushed")
+
+    def fail_commit(c, message):
+        return subprocess.CompletedProcess(args=["git", "commit"], returncode=1, stdout="", stderr="hook declined\n")
+
+    monkeypatch.setattr(mind, "commit_all", fail_commit)
+    draft = tmp_path / "d.md"
+    draft.write_text(DRAFT)
+    with pytest.raises(mind.ValidationError, match="commit failed: hook declined"):
+        mind.cmd_add(cfg, draft, "global", None, tmp_path)
+    log = _git(["log", "--format=%s"], cfg.home).stdout.splitlines()
+    assert log[0] == "mind: earlier unpushed"
+
+
+def test_git_base_args_adds_identity_only_when_git_config_has_none(repo):
+    """A fresh clone (e.g. a cloud container) has no configured git identity
+    at all: git_base_args must supply one so commit_all does not fail with
+    'unable to auto-detect email address'. A repo with its own configured
+    identity must be left alone."""
+    cfg, _, _ = repo
+    args_without_config = mind.git_base_args(cfg)
+    assert "user.name=mind" in args_without_config
+    assert "user.email=mind@localhost" in args_without_config
+
+    _git(["config", "user.email", "real@example.com"], cfg.home)
+    _git(["config", "user.name", "Real Name"], cfg.home)
+    args_with_config = mind.git_base_args(cfg)
+    assert "user.email=mind@localhost" not in args_with_config
+    assert "user.name=mind" not in args_with_config
+
+
 def test_cmd_add_reports_push_failure_but_keeps_commit(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)

@@ -139,11 +139,26 @@ class Config:
         return cls(repo, home, env.get("MIND_TOKEN") or None, env.get("MIND_PROJECT") or None)
 
 
+def _has_configured_identity(cfg: Config) -> bool:
+    """True when git already has a usable user.email, from any config file."""
+    cwd = cfg.home if (cfg.home / ".git").is_dir() else None
+    try:
+        proc = subprocess.run(["git", "config", "user.email"], cwd=cwd, env=dict(cfg.env),
+                              capture_output=True, text=True, timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return proc.returncode == 0 and proc.stdout.strip() != ""
+
+
 def git_base_args(cfg: Config) -> list[str]:
     args = ["git"]
     if cfg.token:
         helper = "!f() { echo username=x-access-token; echo password=$MIND_TOKEN; }; f"
         args += ["-c", f"credential.helper={helper}"]
+    if not _has_configured_identity(cfg):
+        # A fresh clone (a cloud container, most often) may have no identity
+        # configured anywhere; without one, `git commit` fails outright.
+        args += ["-c", "user.name=mind", "-c", "user.email=mind@localhost"]
     return args
 
 
@@ -184,9 +199,15 @@ def pull(cfg: Config) -> str | None:
     return None
 
 
-def commit_all(cfg: Config, message: str) -> None:
+def commit_all(cfg: Config, message: str) -> subprocess.CompletedProcess:
     git(cfg, ["add", "-A"], cfg.home, 10)
-    git(cfg, ["commit", "-q", "-m", message], cfg.home, 10)
+    return git(cfg, ["commit", "-q", "-m", message], cfg.home, 10)
+
+
+def _require_commit(proc: subprocess.CompletedProcess) -> None:
+    if proc.returncode != 0:
+        lines = proc.stderr.strip().splitlines()
+        raise ValidationError("commit failed: " + (lines[-1] if lines else "unknown error"))
 
 
 def _has_upstream(cfg: Config) -> bool:
@@ -373,7 +394,7 @@ def cmd_init(cfg: Config) -> str:
     global_notes_dir(cfg).mkdir(parents=True, exist_ok=True)
     (cfg.home / "projects").mkdir(exist_ok=True)
     reindex(cfg)
-    commit_all(cfg, "mind: init")
+    _require_commit(commit_all(cfg, "mind: init"))
     msg = sync(cfg)
     return "mind: initialised global/ and projects/" + (f", {msg}" if msg else "")
 
@@ -435,7 +456,7 @@ def cmd_add(cfg: Config, draft: Path, scope: str, project: str | None, cwd: Path
         path.unlink()
         path = _write_note(cfg, notes_dir, meta, body)
     reindex(cfg)
-    commit_all(cfg, f"mind: add {meta['id']} {meta['title']}")
+    _require_commit(commit_all(cfg, f"mind: add {meta['id']} {meta['title']}"))
     msg = push(cfg)
     if msg is not None:
         # Push was rejected: the remote moved. Rebase onto it before trying
@@ -479,7 +500,7 @@ def cmd_accept(cfg: Config, note_id: str) -> str:
     note.meta["affirmed"] = _today()
     note.path.write_text(render_frontmatter(note.meta, note.body))
     reindex(cfg)
-    commit_all(cfg, f"mind: accept {note_id}")
+    _require_commit(commit_all(cfg, f"mind: accept {note_id}"))
     msg = sync(cfg)
     return f"mind: accepted {note_id}, " + (msg or "pushed")
 
