@@ -842,18 +842,37 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
 
 
 def cmd_proposals(cfg: Config) -> list[tuple[str, str]]:
-    """Remote proposal branches with their PR URL, plus local propose/* branches
-    that never reached the remote (a failed push), marked "(unpushed)" so a
-    stuck proposal is visible to the owner."""
+    """Remote proposal branches not yet merged into origin/main, with their PR
+    URL, plus local propose/* branches that never reached the remote (a
+    failed push), marked "(unpushed)" so a stuck proposal is visible to the
+    owner. A merged proposal (the PR landed, whether or not GitHub or the
+    owner deleted the remote branch) must stop nagging forever: `--no-merged
+    origin/main` drops it from both lists, and a merged local branch (the
+    worktree's `remove` never deletes the branch it created) is deleted with
+    `branch -d`, safe by definition."""
     try:
         git(cfg, ["fetch", "-q", "--prune"], cfg.home, GIT_TIMEOUTS["pull"])
     except subprocess.TimeoutExpired:
         # Offline: fall through and report whatever the last fetch left in
         # the local refs, same "cached copy" contract as sync()/pull().
         pass
-    proc = git(cfg, ["branch", "-r", "--list", "origin/propose/*", "--format=%(refname:short)"], cfg.home, 5)
+    merged = git(cfg, ["branch", "--list", "propose/*", "--merged", "origin/main",
+                       "--format=%(refname:short)"], cfg.home, 5)
+    for b in merged.stdout.split():
+        if b:
+            # Already proven merged into origin/main above, so -D (rather
+            # than -d) is still safe here: plain -d's own safety check is
+            # against HEAD or the branch's upstream, and HEAD (the shared
+            # checkout's local main) commonly lags origin/main until the
+            # next sync, and the branch's own upstream ref is typically
+            # gone by now (the remote propose/* branch was deleted on
+            # merge).
+            git(cfg, ["branch", "-D", "--", b], cfg.home, 5)
+    proc = git(cfg, ["branch", "-r", "--list", "origin/propose/*", "--no-merged", "origin/main",
+                     "--format=%(refname:short)"], cfg.home, 5)
     branches = [b.removeprefix("origin/") for b in proc.stdout.split() if b]
-    local = git(cfg, ["branch", "--list", "propose/*", "--format=%(refname:short)"], cfg.home, 5)
+    local = git(cfg, ["branch", "--list", "propose/*", "--no-merged", "origin/main",
+                      "--format=%(refname:short)"], cfg.home, 5)
     unpushed = [b for b in local.stdout.split() if b and b not in branches]
     urls: dict[str, str] = {}
     listing = _gh(cfg, ["pr", "list", "--state", "open", "--json", "headRefName,url"], cfg.home)

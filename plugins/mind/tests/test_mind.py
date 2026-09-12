@@ -1668,6 +1668,41 @@ def test_cmd_proposals_lists_unpushed_local_branch(repo):
     assert mind.cmd_proposals(cfg) == [("propose/2026-09-12-stuck", "(unpushed)")]
 
 
+def test_cmd_proposals_omits_merged_and_deleted_remote_branch(repo, tmp_path, monkeypatch):
+    """H2: once a proposal's PR merges and the remote branch is deleted (GitHub
+    auto-delete, or by hand), the surviving local branch must stop being
+    reported as "(unpushed)" forever, and must itself be cleaned up."""
+    cfg, bare, seed = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    _git(["fetch", "-q", "origin", "propose/2026-09-12-x"], seed)
+    _git(["merge", "-q", "--ff-only", "origin/propose/2026-09-12-x"], seed)
+    _git(["push", "-q"], seed)
+    _git(["push", "-q", "origin", "--delete", "propose/2026-09-12-x"], seed)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    assert mind.cmd_proposals(cfg) == []
+    assert _git(["branch", "--list", "propose/2026-09-12-x"], cfg.home).stdout.strip() == ""
+
+
+def test_cmd_proposals_omits_merged_but_kept_remote_branch(repo, tmp_path, monkeypatch):
+    """H2 sibling: a merged remote branch GitHub (or the owner) never deletes
+    must also stop nagging, even though it is still listed on the remote."""
+    cfg, bare, seed = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    _git(["fetch", "-q", "origin", "propose/2026-09-12-x"], seed)
+    _git(["merge", "-q", "--ff-only", "origin/propose/2026-09-12-x"], seed)
+    _git(["push", "-q"], seed)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    assert mind.cmd_proposals(cfg) == []
+
+
 def test_cmd_propose_concurrent_inject_sees_no_unmerged_note(repo, tmp_path, monkeypatch):
     """Step 3b concurrency test: while cmd_propose is mid-flight, an inject
     running against the shared checkout must never see the unmerged note."""
