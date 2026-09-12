@@ -989,6 +989,9 @@ def cmd_capture(cfg: Config, payload: dict, cwd: Path) -> None:
     path = PENDING_FILE(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.stat().st_size > PENDING_CAP:
+        # Read-modify-write with no lock: two concurrent sessions trimming
+        # at the same moment can drop each other's line. Acceptable for a
+        # best-effort capture log; not worth a lock file for this.
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         path.write_text("".join(lines[len(lines) // 2:]), encoding="utf-8")
     cwd_str = str(payload.get("cwd") or cwd)
