@@ -189,8 +189,11 @@ class Config:
 
 
 def _has_configured_identity(cfg: Config) -> bool:
-    """True when git already has a usable user.email, from any config file."""
-    cwd = cfg.home if (cfg.home / ".git").is_dir() else None
+    """True when git already has a usable user.email, from any config file.
+    `.git` is a FILE (not a directory) inside a linked worktree, so check
+    `.exists()`, not `.is_dir()`, or a proposal's worktree commit would miss
+    an identity configured only in the data repo's own `.git/config`."""
+    cwd = cfg.home if (cfg.home / ".git").exists() else None
     try:
         proc = subprocess.run(["git", "config", "user.email"], cwd=cwd, env=dict(cfg.env),
                               capture_output=True, text=True, timeout=5)
@@ -1192,7 +1195,8 @@ def _remote_reachable(cfg: Config) -> tuple[bool, int | str]:
 
 
 def _git_user_email(cfg: Config) -> str | None:
-    cwd = cfg.home if (cfg.home / ".git").is_dir() else None
+    # `.git` is a FILE inside a linked worktree; see _has_configured_identity.
+    cwd = cfg.home if (cfg.home / ".git").exists() else None
     try:
         proc = subprocess.run(["git", "config", "user.email"], cwd=cwd, env=dict(cfg.env),
                               capture_output=True, text=True, timeout=5)

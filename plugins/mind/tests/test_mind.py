@@ -993,6 +993,23 @@ def test_git_base_args_adds_identity_only_when_git_config_has_none(repo):
     assert "user.name=mind" not in args_with_config
 
 
+def test_identity_helpers_find_config_from_a_linked_worktree(repo, tmp_path):
+    """M8: in a linked worktree `.git` is a FILE, not a directory. Checking
+    `.is_dir()` missed that case entirely and ran `git config user.email`
+    with the caller's ambient cwd instead of the data repo, missing an
+    identity configured only in the data repo's own `.git/config`."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _git(["config", "user.email", "owner@example.com"], cfg.home)
+
+    wt = tmp_path / "wt"
+    _git(["worktree", "add", "-q", "-b", "scratch", "--", str(wt)], cfg.home)
+    wcfg = dataclasses.replace(cfg, home=wt)
+    assert (wt / ".git").is_file()   # sanity: a linked worktree, not a plain repo
+    assert mind._has_configured_identity(wcfg) is True
+    assert mind._git_user_email(wcfg) == "owner@example.com"
+
+
 def test_cmd_add_reports_push_failure_but_keeps_commit(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
