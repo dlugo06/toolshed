@@ -921,6 +921,60 @@ def _scoped_notes(cfg: Config, all_projects: bool, project: str | None, cwd: Pat
     return rows
 
 
+def _age_days(affirmed: str) -> int:
+    try:
+        return (dt.date.fromisoformat(_today()) - dt.date.fromisoformat(affirmed)).days
+    except ValueError:
+        return 10**6
+
+
+def cmd_stale(cfg: Config, days: int, all_projects: bool, cwd: Path) -> str:
+    rows = []
+    for prefix, n in _scoped_notes(cfg, all_projects, None, cwd):
+        if n.status != "accepted":
+            continue
+        age = _age_days(str(n.meta.get("affirmed") or ""))
+        if age > days:
+            rows.append((age, prefix, n))
+    if not rows:
+        return "mind: nothing stale"
+    rows.sort(key=lambda r: (-r[0], r[1], r[2].id))
+    out = []
+    for age, prefix, n in rows:
+        strength = n.strength + (" (must, no decay)" if n.strength == "must" else "")
+        out.append(f"{prefix}{n.id} | {n.title} | {n.meta.get('scope')} | {strength} | {n.meta.get('affirmed')} | {age} days\n")
+    return "".join(out)
+
+
+def _edit_note(cfg: Config, note_id: str, changes: dict, message: str) -> Note:
+    note = _find_note(cfg, note_id)
+    if note is None:
+        raise ValidationError(f"no note with id {note_id}")
+    note.meta.update(changes)
+    note.path.write_text(render_frontmatter(note.meta, note.body), encoding="utf-8")
+    reindex(cfg)
+    _require_commit(commit_all(cfg, message))
+    return note
+
+
+def cmd_affirm(cfg: Config, note_id: str, strength: str | None) -> str:
+    changes = {"affirmed": _today()}
+    if strength:
+        if strength not in STRENGTHS:
+            raise ValidationError("strength must be one of: " + ", ".join(STRENGTHS))
+        changes["strength"] = strength
+    _edit_note(cfg, note_id, changes, f"mind: affirm {note_id}")
+    msg = sync(cfg)
+    suffix = f" (strength {strength})" if strength else ""
+    return f"mind: affirmed {note_id}{suffix}, " + (msg or "pushed")
+
+
+def cmd_retire(cfg: Config, note_id: str) -> str:
+    _edit_note(cfg, note_id, {"status": "deprecated"}, f"mind: retire {note_id}")
+    msg = sync(cfg)
+    return f"mind: retired {note_id}, " + (msg or "pushed")
+
+
 def _ask_row(prefix: str, note: "Note", drafts: bool, tag: str = "") -> str:
     line = f"{tag}{prefix}{note.id} | {note.title} | {note.meta.get('scope', 'global')} | {note.strength}"
     if drafts:
@@ -1102,6 +1156,13 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--since")
     pe.add_argument("--limit", type=int, default=200)
     pe.add_argument("--mark")
+    st = sub.add_parser("stale")
+    st.add_argument("--days", type=int, default=90)
+    st.add_argument("--all", action="store_true")
+    af = sub.add_parser("affirm")
+    af.add_argument("note_id")
+    af.add_argument("--strength", choices=STRENGTHS)
+    sub.add_parser("retire").add_argument("note_id")
     return p
 
 
@@ -1189,6 +1250,12 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
                 for row in rows:
                     print(json.dumps(row, ensure_ascii=False))
                 return 0
+        elif args.cmd == "stale":
+            msg = cmd_stale(cfg, args.days, args.all, cwd)
+        elif args.cmd == "affirm":
+            msg = cmd_affirm(cfg, args.note_id, args.strength)
+        elif args.cmd == "retire":
+            msg = cmd_retire(cfg, args.note_id)
     except ValidationError as exc:
         print(f"mind: {exc}", file=sys.stderr)
         return 1

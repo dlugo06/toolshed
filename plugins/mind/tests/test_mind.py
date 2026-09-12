@@ -1860,3 +1860,25 @@ def test_capture_preserves_non_ascii_and_emoji_unescaped(repo, tmp_path):
     assert "é" in line and "😀" in line
     assert "\\u" not in line
     assert json.loads(line)["prompt"] == prompt
+
+
+def test_stale_affirm_retire(repo, tmp_path, monkeypatch):
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Old should rule", "o")
+    _add(cfg, tmp_path, "Old must rule", "m")
+    for p in mind.global_notes_dir(cfg).glob("*.md"):
+        t = p.read_text().replace(f"affirmed: {dt.date.today().isoformat()}", "affirmed: 2026-01-01")
+        if "Old must" in t:
+            t = t.replace("strength: should", "strength: must")
+        p.write_text(t)
+    monkeypatch.setattr(mind, "_today", lambda: "2026-07-01")
+    out = mind.cmd_stale(cfg, 90, False, tmp_path)
+    assert out == ("PREF-REV-001 | Old should rule | global | should | 2026-01-01 | 181 days\n"
+                   "PREF-REV-002 | Old must rule | global | must (must, no decay) | 2026-01-01 | 181 days\n")
+    assert mind.cmd_affirm(cfg, "PREF-REV-001", "default") == "mind: affirmed PREF-REV-001 (strength default), pushed"
+    meta, _ = mind.parse_frontmatter(next(mind.global_notes_dir(cfg).glob("PREF-REV-001-*.md")).read_text())
+    assert meta["affirmed"] == "2026-07-01" and meta["strength"] == "default"
+    assert mind.cmd_retire(cfg, "PREF-REV-002") == "mind: retired PREF-REV-002, pushed"
+    assert mind.cmd_stale(cfg, 90, False, tmp_path) == "mind: nothing stale"
+    assert _git(["log", "--format=%s", "main", "-2"], bare).stdout.splitlines() == ["mind: retire PREF-REV-002", "mind: affirm PREF-REV-001"]
