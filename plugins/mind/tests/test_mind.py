@@ -1529,3 +1529,248 @@ def test_hook_end_to_end(repo, tmp_path):
     )
     assert proc.returncode == 0
     assert "- PREF-REV-001 | Global rule | should" in proc.stdout
+
+
+class FakeGh:
+    """Records argv; returns a PR URL for `pr create`, a JSON list for `pr list`."""
+    def __init__(self, existing=None):
+        self.calls = []
+        self.existing = existing or []
+
+    def __call__(self, cfg, args, cwd, timeout=20):
+        self.calls.append(args)
+        if args[:2] == ["pr", "create"]:
+            return subprocess.CompletedProcess(args, 0, "https://example.test/pr/7\n", "")
+        if args[:2] == ["pr", "list"]:
+            return subprocess.CompletedProcess(args, 0, json.dumps(self.existing), "")
+        if args[:2] == ["auth", "status"]:
+            return subprocess.CompletedProcess(args, 0, "", "Logged in")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+
+def test_cmd_propose_branch_commits_pr_and_returns_to_main(repo, tmp_path, monkeypatch):
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    fake = FakeGh(); monkeypatch.setattr(mind, "_gh", fake)
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
+    d2 = tmp_path / "b.md"; d2.write_text(DRAFT.replace("Tests must assert concrete values", "Second claim"))
+    out = mind.cmd_propose(cfg, [d1, d2], "Digest Run", "global", None, None, tmp_path)
+    assert out == "mind: proposed 2 notes on propose/2026-09-12-digest-run, PR https://example.test/pr/7"
+    assert _git(["branch", "--show-current"], cfg.home).stdout.strip() == "main"
+    assert not list(cfg.home.parent.glob("worktree-*"))          # temporary worktree removed
+    assert _git(["worktree", "list"], cfg.home).stdout.count("\n") == 1   # only the main checkout remains
+    log = _git(["log", "--format=%s", "propose/2026-09-12-digest-run", "-2"], bare).stdout.splitlines()
+    assert log == ["mind: propose PRIN-TEST-002 Second claim", "mind: propose PRIN-TEST-001 Tests must assert concrete values"]
+    assert not list(mind.global_notes_dir(cfg).glob("PRIN-TEST-*.md"))   # main untouched
+    create = [c for c in fake.calls if c[:2] == ["pr", "create"]][0]
+    assert "--title" in create and create[create.index("--title") + 1] == "mind: Digest Run (2 notes)"
+    body = Path(create[create.index("--body-file") + 1]).read_text()
+    assert body.startswith("- PRIN-TEST-001 | Tests must assert concrete values | global | must\n  Assert exact values, never `is not None`.\n")
+
+
+def test_cmd_propose_without_gh(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
+    assert mind.cmd_propose(cfg, [d1], "x", "global", None, None, tmp_path) == \
+        "mind: proposed 1 note on propose/2026-09-12-x, open the PR by hand"
+
+
+def test_cmd_propose_rejects_batch_on_invalid_draft(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    good = tmp_path / "a.md"; good.write_text(DRAFT)
+    bad = tmp_path / "b.md"; bad.write_text("---\ntitle: x\ntype: wish\nstage: review\nstrength: must\n---\nb\n")
+    with pytest.raises(mind.ValidationError, match="b.md: type must be one of"):
+        mind.cmd_propose(cfg, [good, bad], "x", "global", None, None, tmp_path)
+    assert _git(["branch", "--list", "propose/*"], cfg.home).stdout == ""
+
+
+def test_cmd_propose_supersedes_flips_old_note_in_branch(repo, tmp_path, monkeypatch):
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Old rule", "old")
+    monkeypatch.setattr(mind, "_gh", FakeGh()); monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "n.md"
+    d.write_text("---\ntitle: New rule\ntype: preference\nstage: review\nstrength: should\nsupersedes: PREF-REV-001\n---\nnew\n")
+    mind.cmd_propose(cfg, [d], "revise", "global", None, None, tmp_path)
+    shown = _git(["show", "propose/2026-09-12-revise:global/notes/PREF-REV-001-old-rule.md"], bare).stdout
+    assert "status: superseded" in shown
+
+
+def test_cmd_proposals_lists_open_branches(repo, monkeypatch):
+    cfg, _, seed = repo
+    mind.cmd_init(cfg)
+    _git(["checkout", "-q", "-b", "propose/2026-09-12-x"], seed); (seed / "z.md").write_text("z\n")
+    _git(["add", "."], seed); _git(["commit", "-q", "-m", "z"], seed); _git(["push", "-q", "-u", "origin", "propose/2026-09-12-x"], seed)
+    monkeypatch.setattr(mind, "_gh", FakeGh(existing=[{"headRefName": "propose/2026-09-12-x", "url": "https://example.test/pr/9"}]))
+    assert mind.cmd_proposals(cfg) == [("propose/2026-09-12-x", "https://example.test/pr/9")]
+
+
+def test_cmd_proposals_lists_unpushed_local_branch(repo):
+    """A propose branch committed but never pushed (a failed push) must
+    still be visible to the owner, tagged "(unpushed)"."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _git(["checkout", "-q", "-b", "propose/2026-09-12-stuck"], cfg.home)
+    (cfg.home / "stuck.md").write_text("stuck\n")
+    _git(["add", "."], cfg.home); _git(["commit", "-q", "-m", "stuck"], cfg.home)
+    _git(["checkout", "-q", "main"], cfg.home)
+    assert mind.cmd_proposals(cfg) == [("propose/2026-09-12-stuck", "(unpushed)")]
+
+
+def test_cmd_propose_concurrent_inject_sees_no_unmerged_note(repo, tmp_path, monkeypatch):
+    """Step 3b concurrency test: while cmd_propose is mid-flight, an inject
+    running against the shared checkout must never see the unmerged note."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    captured = {}
+
+    def fake_gh(c, args, cwd, timeout=20):
+        if args[:2] == ["pr", "create"]:
+            captured["inject"] = mind.cmd_inject(cfg, "compact", tmp_path)
+            return subprocess.CompletedProcess(args, 0, "https://example.test/pr/1\n", "")
+        if args[:2] == ["pr", "list"]:
+            return subprocess.CompletedProcess(args, 0, "[]", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(mind, "_gh", fake_gh)
+    d = tmp_path / "a.md"
+    d.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d], "concurrency test", "global", None, None, tmp_path)
+    assert "Tests must assert concrete values" not in captured["inject"]
+
+
+def test_cmd_propose_removes_worktree_on_commit_failure(repo, tmp_path, monkeypatch):
+    """Given the first draft commits fine but the second draft's commit
+    fails / the worktree must still be removed via the `finally` clause."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
+    d2 = tmp_path / "b.md"; d2.write_text(DRAFT.replace("Tests must assert concrete values", "Second claim"))
+    real_commit_all = mind.commit_all
+    calls = {"n": 0}
+
+    def flaky_commit(c, message):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return subprocess.CompletedProcess(args=["git", "commit"], returncode=1, stdout="", stderr="hook declined\n")
+        return real_commit_all(c, message)
+
+    monkeypatch.setattr(mind, "commit_all", flaky_commit)
+    with pytest.raises(mind.ValidationError, match="commit failed: hook declined"):
+        mind.cmd_propose(cfg, [d1, d2], "x", "global", None, None, tmp_path)
+    assert not list(cfg.home.parent.glob("worktree-*"))
+    assert _git(["worktree", "list"], cfg.home).stdout.count("\n") == 1
+
+
+def test_cmd_propose_push_failure_keeps_branch_locally(repo, tmp_path, monkeypatch):
+    """Given the branch's `git push` fails / cmd_propose returns the
+    committed-locally message, removes the worktree, and the branch
+    survives locally per spec section 11."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:1] == ["push"]:
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="fatal: push failed\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert out == "mind: proposal branch propose/2026-09-12-x is committed locally; push failed"
+    assert not list(cfg.home.parent.glob("worktree-*"))
+    assert _git(["branch", "--list", "propose/2026-09-12-x"], cfg.home).stdout.strip() == "propose/2026-09-12-x"
+
+
+def test_cmd_propose_reuses_existing_branch_and_pr(repo, tmp_path, monkeypatch):
+    """Given propose/2026-09-12-x already exists on origin with PRIN-TEST-001
+    (from a prior cmd_propose call) / a second cmd_propose call omits -b from
+    worktree add, both notes land on the branch, and no new pr create call
+    is made (the existing PR is reused)."""
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    fake = FakeGh()
+    monkeypatch.setattr(mind, "_gh", fake)
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
+    out1 = mind.cmd_propose(cfg, [d1], "x", "global", None, None, tmp_path)
+    assert out1 == "mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+    fake.existing = [{"headRefName": "propose/2026-09-12-x", "url": "https://example.test/pr/7"}]
+
+    captured = {}
+    real_git = mind.git
+
+    def spy(c, args, cwd, timeout):
+        if args[:2] == ["worktree", "add"]:
+            captured["args"] = args
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", spy)
+    calls_before = len(fake.calls)
+    d2 = tmp_path / "b.md"; d2.write_text(DRAFT.replace("Tests must assert concrete values", "Second claim"))
+    out2 = mind.cmd_propose(cfg, [d2], "x", "global", None, None, tmp_path)
+    assert out2 == "mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+    assert "-b" not in captured["args"]
+    new_calls = fake.calls[calls_before:]
+    assert [c for c in new_calls if c[:2] == ["pr", "create"]] == []
+    log = _git(["log", "--format=%s", "propose/2026-09-12-x", "-2"], bare).stdout.splitlines()
+    assert log == ["mind: propose PRIN-TEST-002 Second claim", "mind: propose PRIN-TEST-001 Tests must assert concrete values"]
+
+
+def test_cmd_propose_starts_from_fresh_origin_main_not_stale_local(repo, tmp_path, seed_note, monkeypatch):
+    """Given origin/main already has PRIN-TEST-001 pushed directly via seed
+    while cfg.home's local main is stale/behind / the assigned ID is
+    PRIN-TEST-002, proving the worktree started from freshly-fetched
+    origin/main, not cfg.home's stale local main."""
+    cfg, bare, seed = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    seed_note(seed, "global/notes/PRIN-TEST-001-other.md", "PRIN-TEST-001", "Other")
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert out == "mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+    log = _git(["log", "--format=%s", "propose/2026-09-12-x", "-1"], bare).stdout.splitlines()
+    assert log == ["mind: propose PRIN-TEST-002 Tests must assert concrete values"]
+
+
+def test_cmd_propose_unmerged_note_invisible_to_ask_on_main(repo, tmp_path, monkeypatch):
+    """Cross-layer: a proposed note must never be visible to ask on the
+    shared checkout before the proposal branch is merged."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert mind.cmd_ask(cfg, ["assert", "concrete"], False, None, False, tmp_path) == \
+        "mind: no note matches 'assert concrete'"
+
+
+def test_cmd_propose_note_appears_after_branch_is_merged(repo, tmp_path, monkeypatch):
+    """Cross-layer: the trust boundary flips only on merge — after the
+    branch is merged into main and synced down, ask finds the note."""
+    cfg, bare, seed = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    _git(["fetch", "-q", "origin", "propose/2026-09-12-x"], seed)
+    _git(["merge", "-q", "--ff-only", "origin/propose/2026-09-12-x"], seed)
+    _git(["push", "-q"], seed)
+    assert mind.sync(cfg) is None
+    out = mind.cmd_ask(cfg, ["assert", "concrete"], False, None, False, tmp_path)
+    assert "PRIN-TEST-001 | Tests must assert concrete values" in out

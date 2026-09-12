@@ -722,6 +722,138 @@ def cmd_accept(cfg: Config, note_id: str) -> str:
     return f"mind: accepted {note_id}, " + (msg or "pushed")
 
 
+def _gh(cfg: Config, args: list[str], cwd: Path, timeout: float = 20) -> subprocess.CompletedProcess | None:
+    """gh, never through a shell. None when gh is not installed."""
+    if shutil.which("gh") is None:
+        return None
+    env = {k: v for k, v in cfg.env.items() if k != "MIND_TOKEN"}
+    try:
+        return subprocess.run(["gh", *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _worktree_path(cfg: Config, branch: str) -> Path:
+    return cfg.home.parent / ("worktree-" + branch.replace("/", "-"))
+
+
+def _proposal_body(rows: list[tuple[str, "Note"]], cwd_slug: str) -> str:
+    out = []
+    for prefix, n in rows:
+        out.append(f"- {prefix}{n.id} | {n.title} | {n.meta.get('scope')} | {n.strength}\n  {n.first_paragraph}\n")
+    out.append(f"\nSource: session {_today()}, {cwd_slug}\n")
+    return "".join(out)
+
+
+def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project: str | None,
+                body: Path | None, cwd: Path) -> str:
+    """Write proposals in a temporary git worktree of the data repo, never in
+    the shared checkout: a concurrent inject/ask/add on cfg.home must never
+    see an unmerged proposal branch as accepted notes, and cfg.home never
+    leaves main."""
+    parsed = []
+    for d in drafts:
+        meta, text = parse_frontmatter(d.read_text(encoding="utf-8"))
+        draft_scope = meta.pop("scope", None)
+        errs = validate_meta(meta)
+        if errs:
+            raise ValidationError(f"{d.name}: " + "; ".join(errs))
+        parsed.append((d, meta, text, draft_scope))
+    topic_slug = _slugify(topic)
+    _validate_slug(topic_slug)
+    branch = f"propose/{_today()}-{topic_slug}"
+    git(cfg, ["fetch", "-q", "origin"], cfg.home, GIT_TIMEOUTS["pull"])
+    wt = _worktree_path(cfg, branch)
+    remote_has = git(cfg, ["rev-parse", "--verify", "-q", f"origin/{branch}"], cfg.home, 5).returncode == 0
+    start = f"origin/{branch}" if remote_has else "origin/main"
+    if not _has_upstream(cfg) and not remote_has:
+        start = "HEAD"
+    add_args = (["worktree", "add", "-q", "--", str(wt), start] if remote_has
+                else ["worktree", "add", "-q", "-b", branch, "--", str(wt), start])
+    proc = git(cfg, add_args, cfg.home, 20)
+    if proc.returncode != 0:
+        raise ValidationError("worktree failed: " + _redact((proc.stderr.strip().splitlines() or ["unknown"])[-1], cfg))
+    if remote_has:
+        git(cfg, ["checkout", "-q", "-B", branch, f"origin/{branch}"], wt, 10)
+    wcfg = dataclasses.replace(cfg, home=wt)
+    rows: list[tuple[str, Note]] = []
+    try:
+        for d, meta, text, draft_scope in parsed:
+            eff_scope, eff_project = scope, project
+            if draft_scope == "global":
+                eff_scope = "global"
+            elif draft_scope and draft_scope.startswith("project:"):
+                eff_scope, eff_project = "project", draft_scope.split(":", 1)[1]
+            if eff_scope == "global":
+                notes_dir, prefix, scope_value = global_notes_dir(wcfg), "", "global"
+            else:
+                candidate = _slugify(eff_project) if eff_project else resolve_candidate(cfg, cwd)
+                _validate_slug(candidate)
+                slug = match_project(wcfg, candidate) or candidate
+                _ensure_project(wcfg, slug)
+                notes_dir, prefix, scope_value = project_notes_dir(wcfg, slug), f"{slug}/", f"project:{slug}"
+            notes_dir.mkdir(parents=True, exist_ok=True)
+            meta.setdefault("status", "accepted")
+            meta.setdefault("affirmed", _today())
+            meta.setdefault("supersedes", None)
+            meta.setdefault("source", f"proposal {_today()}, {resolve_candidate(cfg, cwd)}")
+            meta["scope"] = scope_value
+            path = _write_note(wcfg, notes_dir, meta, text)
+            old = _find_note(wcfg, meta["supersedes"]) if meta.get("supersedes") else None
+            if old is not None:
+                old.meta["status"] = "superseded"
+                old.path.write_text(render_frontmatter(old.meta, old.body), encoding="utf-8")
+            _require_commit(commit_all(wcfg, f"mind: propose {meta['id']} {meta['title']}"))
+            rows.append((prefix, Note(path, *parse_frontmatter(path.read_text(encoding="utf-8")))))
+        push_proc = git(wcfg, ["push", "-q", "-u", "origin", branch], wt, GIT_TIMEOUTS["push"])
+        if push_proc.returncode != 0:
+            return f"mind: proposal branch {branch} is committed locally; push failed"
+        n = len(rows)
+        noun = "note" if n == 1 else "notes"
+        body_file = body or (cfg.home.parent / f"proposal-{topic_slug}.md")
+        if body is None:
+            body_file.write_text(_proposal_body(rows, resolve_candidate(cfg, cwd)), encoding="utf-8")
+        listing = _gh(cfg, ["pr", "list", "--head", branch, "--json", "url"], cfg.home)
+        if listing is None:
+            return f"mind: proposed {n} {noun} on {branch}, open the PR by hand"
+        try:
+            found = json.loads(listing.stdout or "[]")
+        except json.JSONDecodeError:
+            found = []
+        if found:
+            url = found[0].get("url", "")
+        else:
+            created = _gh(cfg, ["pr", "create", "--base", "main", "--head", branch, "--title",
+                                f"mind: {topic} ({n} {noun})", "--body-file", str(body_file)], cfg.home)
+            if created is None or created.returncode != 0:
+                return f"mind: proposed {n} {noun} on {branch}, open the PR by hand"
+            url = created.stdout.strip().splitlines()[-1]
+        return f"mind: proposed {n} {noun} on {branch}, PR {_redact(url, cfg)}"
+    finally:
+        git(cfg, ["worktree", "remove", "--force", "--", str(wt)], cfg.home, 20)
+        git(cfg, ["worktree", "prune"], cfg.home, 10)
+
+
+def cmd_proposals(cfg: Config) -> list[tuple[str, str]]:
+    """Remote proposal branches with their PR URL, plus local propose/* branches
+    that never reached the remote (a failed push), marked "(unpushed)" so a
+    stuck proposal is visible to the owner."""
+    git(cfg, ["fetch", "-q", "--prune"], cfg.home, GIT_TIMEOUTS["pull"])
+    proc = git(cfg, ["branch", "-r", "--list", "origin/propose/*", "--format=%(refname:short)"], cfg.home, 5)
+    branches = [b.removeprefix("origin/") for b in proc.stdout.split() if b]
+    local = git(cfg, ["branch", "--list", "propose/*", "--format=%(refname:short)"], cfg.home, 5)
+    unpushed = [b for b in local.stdout.split() if b and b not in branches]
+    urls: dict[str, str] = {}
+    listing = _gh(cfg, ["pr", "list", "--state", "open", "--json", "headRefName,url"], cfg.home)
+    if listing is not None and listing.returncode == 0:
+        try:
+            for row in json.loads(listing.stdout or "[]"):
+                urls[row.get("headRefName", "")] = row.get("url", "")
+        except json.JSONDecodeError:
+            pass
+    return [(b, urls.get(b, "")) for b in branches] + [(b, "(unpushed)") for b in unpushed]
+
+
 def _scoped_notes(cfg: Config, all_projects: bool, project: str | None, cwd: Path) -> list[tuple[str, Note]]:
     rows = [("", n) for n in load_notes(global_notes_dir(cfg))]
     if all_projects:
@@ -905,6 +1037,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("accept").add_argument("note_id")
     sub.add_parser("sync").add_argument("--pull-only", action="store_true")
     sub.add_parser("init")
+    pr = sub.add_parser("propose")
+    pr.add_argument("drafts", nargs="+")
+    pr.add_argument("--topic", required=True)
+    pr.add_argument("--scope", choices=["global", "project"], default="global")
+    pr.add_argument("--project")
+    pr.add_argument("--body")
+    sub.add_parser("proposals")
     return p
 
 
@@ -966,6 +1105,12 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
             msg = "mind: reindexed"
         elif args.cmd == "sync":
             msg = sync(cfg, pull_only=args.pull_only) or "mind: in sync"
+        elif args.cmd == "propose":
+            msg = cmd_propose(cfg, [Path(d) for d in args.drafts], args.topic, args.scope, args.project,
+                              Path(args.body) if args.body else None, cwd)
+        elif args.cmd == "proposals":
+            rows = cmd_proposals(cfg)
+            msg = "\n".join(f"{b} {u}" for b, u in rows) if rows else "mind: no open proposals"
     except ValidationError as exc:
         print(f"mind: {exc}", file=sys.stderr)
         return 1
