@@ -1840,6 +1840,32 @@ def test_cmd_propose_reuses_existing_branch_and_pr(repo, tmp_path, monkeypatch):
     assert log == ["mind: propose PRIN-TEST-002 Second claim", "mind: propose PRIN-TEST-001 Tests must assert concrete values"]
 
 
+def test_cmd_propose_raises_when_worktree_add_fails_for_existing_remote_branch(repo, tmp_path, monkeypatch):
+    """M3: the remote-exists path resets onto origin/<branch> with a single
+    atomic `worktree add -B`; a failure there (a locked ref, a leftover
+    worktree) must raise instead of silently leaving a detached HEAD that
+    still reports success."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d1], "x", "global", None, None, tmp_path)   # branch now exists on origin
+
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:1] == ["worktree"] and "-B" in args:
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="fatal: reference is locked\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d2 = tmp_path / "b.md"; d2.write_text(DRAFT.replace("Tests must assert concrete values", "Second claim"))
+    with pytest.raises(mind.ValidationError, match="worktree failed: fatal: reference is locked"):
+        mind.cmd_propose(cfg, [d2], "x", "global", None, None, tmp_path)
+    assert not list(cfg.home.parent.glob("worktree-*"))
+
+
 def test_cmd_propose_starts_from_fresh_origin_main_not_stale_local(repo, tmp_path, seed_note, monkeypatch):
     """Given origin/main already has PRIN-TEST-001 pushed directly via seed
     while cfg.home's local main is stale/behind / the assigned ID is

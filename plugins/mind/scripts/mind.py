@@ -771,7 +771,11 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
     # never reached the remote) must append to that same local branch, not
     # die on `worktree add -b` because the branch already exists.
     if remote_has:
-        add_args = ["worktree", "add", "-q", "--", str(wt), f"origin/{branch}"]
+        # -B (not a detached add + a separate checkout -B) resets the local
+        # branch onto origin/<branch> atomically: a two-step version left
+        # commits on a detached HEAD with the checkout's returncode ignored
+        # whenever the second step failed.
+        add_args = ["worktree", "add", "-q", "-B", branch, "--", str(wt), f"origin/{branch}"]
     elif local_has:
         add_args = ["worktree", "add", "-q", "--", str(wt), branch]
     else:
@@ -780,8 +784,6 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
     proc = git(cfg, add_args, cfg.home, 20)
     if proc.returncode != 0:
         raise ValidationError("worktree failed: " + _redact((proc.stderr.strip().splitlines() or ["unknown"])[-1], cfg))
-    if remote_has:
-        git(cfg, ["checkout", "-q", "-B", branch, f"origin/{branch}"], wt, 10)
     wcfg = dataclasses.replace(cfg, home=wt)
     rows: list[tuple[str, Note]] = []
     try:
