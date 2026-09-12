@@ -39,6 +39,33 @@ def test_hook_is_silent_without_mind_repo(tmp_path):
     assert proc.stdout == ""
 
 
+def test_hook_does_not_block_on_a_tty_stdin(tmp_path):
+    """Run by hand at a terminal (no piped SessionStart JSON), the hook must
+    default to 'startup' immediately rather than block on
+    `json.load(sys.stdin)` waiting for an EOF a human at a keyboard never
+    sends."""
+    import pty
+
+    env = dict(os.environ, MIND_REPO=str(tmp_path / "missing.git"), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    controller_fd, follower_fd = pty.openpty()
+    try:
+        proc = subprocess.Popen(
+            ["sh", str(PLUGIN / "scripts" / "session-start.sh")],
+            stdin=follower_fd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, cwd=tmp_path, text=True,
+        )
+        os.close(follower_fd)
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            pytest.fail("hook blocked on a tty stdin instead of defaulting to startup")
+        assert proc.returncode == 0
+    finally:
+        os.close(controller_fd)
+
+
 def test_main_add_reports_clone_failure_on_stderr_and_returns_1(tmp_path, capsys):
     """Only inject (the session-start hook) may swallow a clone failure and
     exit 0; every other command must fail loudly, or the owner sees a
