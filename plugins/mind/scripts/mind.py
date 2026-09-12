@@ -271,8 +271,21 @@ def pull(cfg: Config) -> str | None:
 
 
 def commit_all(cfg: Config, message: str) -> subprocess.CompletedProcess:
-    git(cfg, ["add", "-A"], cfg.home, 10)
+    add_proc = git(cfg, ["add", "-A"], cfg.home, 10)
+    if add_proc.returncode != 0:
+        # A failed add (index.lock from a concurrent mind, permissions, a
+        # corrupt index) can leave the note file on disk but unstaged, while
+        # `git commit` would happily succeed on whatever else was staged.
+        # Surface the add's own failure instead of proceeding to commit.
+        return add_proc
     return git(cfg, ["commit", "-q", "-m", message], cfg.home, 10)
+
+
+def _amend_all(cfg: Config, message: str) -> subprocess.CompletedProcess:
+    add_proc = git(cfg, ["add", "-A"], cfg.home, 10)
+    if add_proc.returncode != 0:
+        return add_proc
+    return git(cfg, ["commit", "-q", "--amend", "-m", message], cfg.home, 10)
 
 
 def _require_commit(proc: subprocess.CompletedProcess) -> None:
@@ -583,8 +596,10 @@ def cmd_add(cfg: Config, draft: Path, scope: str, project: str | None, cwd: Path
                 path.unlink()
                 path = _write_note(cfg, notes_dir, meta, body)
                 reindex(cfg)
-                git(cfg, ["add", "-A"], cfg.home, 10)
-                git(cfg, ["commit", "-q", "--amend", "-m", f"mind: add {meta['id']} {meta['title']}"], cfg.home, 10)
+                # Raise before push: on an amend failure, the pre-amend commit
+                # (the one still carrying the duplicate ID) must never be the
+                # one that goes out.
+                _require_commit(_amend_all(cfg, f"mind: add {meta['id']} {meta['title']}"))
             msg = push(cfg)
     note_id = parse_frontmatter(path.read_text())[0]["id"]
     scope_label = "global" if scope == "global" else f"project {prefix[:-1]}"

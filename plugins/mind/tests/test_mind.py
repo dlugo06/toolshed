@@ -801,6 +801,82 @@ def test_cmd_add_raises_on_commit_failure_and_keeps_earlier_unpushed_commit(repo
     assert log[0] == "mind: earlier unpushed"
 
 
+def test_commit_all_surfaces_add_failure_without_committing(repo, monkeypatch):
+    """A failed `git add -A` (index.lock from a concurrent mind, a corrupt
+    index) must not let `git commit` proceed and silently succeed on
+    whatever else happened to be staged."""
+    cfg, _, _ = repo
+    (cfg.home / "x.md").write_text("x\n")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:2] == ["add", "-A"]:
+            return subprocess.CompletedProcess(args=args, returncode=128, stdout="", stderr="fatal: index.lock exists\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    proc = mind.commit_all(cfg, "mind: test")
+    assert proc.returncode == 128
+    assert proc.stderr.strip() == "fatal: index.lock exists"
+    log = _git(["log", "--format=%s"], cfg.home).stdout.splitlines()
+    assert log[0] != "mind: test"
+
+
+def test_cmd_add_raises_when_add_fails(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:2] == ["add", "-A"]:
+            return subprocess.CompletedProcess(args=args, returncode=128, stdout="", stderr="fatal: index.lock exists\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    draft = tmp_path / "d.md"
+    draft.write_text(DRAFT)
+    with pytest.raises(mind.ValidationError, match="fatal: index.lock exists"):
+        mind.cmd_add(cfg, draft, "global", None, tmp_path)
+
+
+def test_cmd_add_amend_failure_raises_before_push(repo, tmp_path, monkeypatch):
+    """If the collision-rename amend fails, the pre-amend commit (still
+    carrying the duplicate ID) must never be the one pushed, and the wrong
+    ID reported."""
+    cfg_a, bare, _ = repo
+    mind.cmd_init(cfg_a)
+    home_b = tmp_path / "home_b"
+    cfg_b = dataclasses.replace(cfg_a, home=home_b)
+    assert mind.ensure_checkout(cfg_b) is None
+
+    draft_a = tmp_path / "a.md"
+    draft_a.write_text(DRAFT)
+    draft_b = tmp_path / "b.md"
+    draft_b.write_text(DRAFT.replace("Tests must assert concrete values", "Never skip the plan tests step"))
+
+    real_sync = mind.sync
+    monkeypatch.setattr(
+        mind, "sync",
+        lambda c, pull_only=False: None if (pull_only and c.home == cfg_b.home) else real_sync(c, pull_only),
+    )
+    out_a = mind.cmd_add(cfg_a, draft_a, "global", None, tmp_path)
+    assert out_a == "mind: added PRIN-TEST-001 (global), pushed"
+
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:3] == ["commit", "-q", "--amend"]:
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="hook declined\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    before = _git(["ls-remote", "--heads", str(bare)], tmp_path).stdout
+    with pytest.raises(mind.ValidationError, match="hook declined"):
+        mind.cmd_add(cfg_b, draft_b, "global", None, tmp_path)
+    after = _git(["ls-remote", "--heads", str(bare)], tmp_path).stdout
+    assert before == after  # nothing new pushed
+
+
 def test_git_base_args_resets_credential_helpers_before_custom_one(repo):
     """Without an explicit reset, a configured osxkeychain/gh helper answers
     first and (on success) every configured helper's store action runs too,
