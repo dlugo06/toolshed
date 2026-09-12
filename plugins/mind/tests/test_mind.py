@@ -2336,6 +2336,27 @@ def test_doctor_lines(repo, tmp_path, monkeypatch):
     assert "sekrit" not in "\n".join(out)
 
 
+def test_doctor_upstream_checks_main_specifically_not_current_head(repo, monkeypatch):
+    """L: `upstream:` must reflect main's own tracking branch, not whatever
+    branch happens to be checked out in cfg.home at the time."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _git(["checkout", "-q", "-b", "scratch"], cfg.home)   # HEAD now on a branch with no upstream
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
+    out = mind.cmd_doctor(cfg).splitlines()
+    assert out[2] == "upstream: main tracks origin/main"
+
+
+def test_remote_reachable_reports_missing_checkout_directory(tmp_path):
+    """L: when cfg.home.parent does not exist at all, `_remote_reachable`
+    must say so specifically, not the generic "unreachable" it shares with
+    a real network failure."""
+    env = {"MIND_REPO": str(tmp_path / "missing.git"), "MIND_HOME": str(tmp_path / "nowhere" / "home")}
+    cfg = mind.Config.from_env(env, tmp_path)
+    assert mind._remote_reachable(cfg) == (False, "no checkout directory")
+
+
 def test_doctor_missing_checkout_never_clones(tmp_path, monkeypatch):
     """doctor must never call ensure_checkout (which would clone or mutate):
     it reports `checkout: missing` for a home that was never cloned, purely
@@ -2353,4 +2374,19 @@ def test_doctor_missing_checkout_never_clones(tmp_path, monkeypatch):
     out = mind.cmd_doctor(cfg).splitlines()
     assert not cfg.home.exists()
     assert out[1] == "checkout: missing"
+    assert out[8] == "notes: 0 accepted, 0 drafts, 0 malformed, 0 projects"
+
+
+def test_doctor_without_mind_repo_reports_unset_and_continues(tmp_path, monkeypatch, capsys):
+    """L: doctor is a diagnostic command for a broken setup, and MIND_REPO
+    unset is exactly the kind of thing a second machine needs it to explain
+    -- it must not exit 1 with a stderr message and print nothing else."""
+    env = {"MIND_HOME": str(tmp_path / "home")}
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    rc = mind.main(["doctor"], env=env, cwd=tmp_path)
+    out = capsys.readouterr().out.splitlines()
+    assert rc == 0
+    assert out[0].startswith("config: MIND_REPO=unset MIND_HOME=")
+    assert out[1] == "checkout: missing"
+    assert out[3] == "remote: unreachable (MIND_REPO not set)"
     assert out[8] == "notes: 0 accepted, 0 drafts, 0 malformed, 0 projects"

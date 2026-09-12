@@ -174,11 +174,12 @@ class Config:
     env: dict = dataclasses.field(default_factory=lambda: os.environ)
 
     @classmethod
-    def from_env(cls, env, cwd: Path) -> "Config":
-        repo = env.get("MIND_REPO")
-        if not repo:
+    def from_env(cls, env, cwd: Path, *, require_repo: bool = True) -> "Config":
+        repo = env.get("MIND_REPO") or ""
+        if require_repo and not repo:
             raise ConfigError("MIND_REPO is not set")
-        _validate_repo_url(repo)
+        if repo:
+            _validate_repo_url(repo)
         if env.get("MIND_HOME"):
             home = Path(env["MIND_HOME"])
         elif env.get("CLAUDE_PLUGIN_DATA"):
@@ -373,6 +374,13 @@ def _require_commit(proc: subprocess.CompletedProcess) -> None:
 def _has_upstream(cfg: Config) -> bool:
     proc = git(cfg, ["rev-parse", "--abbrev-ref", "@{u}"], cfg.home, 5)
     return proc.returncode == 0
+
+
+def _main_tracks_origin_main(cfg: Config) -> bool:
+    """Specifically main's own upstream, not whatever branch happens to be
+    checked out in cfg.home (`doctor`'s printed claim is about `main`)."""
+    proc = git(cfg, ["rev-parse", "--abbrev-ref", "main@{u}"], cfg.home, 5)
+    return proc.returncode == 0 and proc.stdout.strip() == "origin/main"
 
 
 def _has_head(cfg: Config) -> bool:
@@ -1183,6 +1191,11 @@ def _checkout_state(cfg: Config) -> str:
 def _remote_reachable(cfg: Config) -> tuple[bool, int | str]:
     """`git ls-remote` against cfg.repo directly (not the "origin" remote
     name), so this works even when cfg.home was never cloned."""
+    if not cfg.home.parent.is_dir():
+        # git's cwd (cfg.home.parent) doesn't exist at all: a plain OSError
+        # from Popen would otherwise read as the generic "unreachable" a
+        # real network failure also produces.
+        return False, "no checkout directory"
     t0 = time.monotonic()
     try:
         proc = git(cfg, ["ls-remote", "--heads", "--", cfg.repo], cfg.home.parent, 10)
@@ -1208,14 +1221,20 @@ def _git_user_email(cfg: Config) -> str | None:
 
 def cmd_doctor(cfg: Config) -> str:
     lines: list[str] = []
+    repo_display = cfg.repo if cfg.repo else "unset"
     lines.append(_redact(
-        f"config: MIND_REPO={cfg.repo} MIND_HOME={cfg.home} "
+        f"config: MIND_REPO={repo_display} MIND_HOME={cfg.home} "
         f"MIND_TOKEN={'set' if cfg.token else 'unset'} MIND_PROJECT={cfg.project or 'unset'}", cfg))
     state = _checkout_state(cfg)
     lines.append(f"checkout: {state}")
-    lines.append("upstream: main tracks origin/main" if state == "ok" and _has_upstream(cfg) else "upstream: none")
-    reachable, info = _remote_reachable(cfg)
-    lines.append(f"remote: reachable ({info} ms)" if reachable else f"remote: unreachable ({_redact(str(info), cfg)})")
+    lines.append("upstream: main tracks origin/main" if state == "ok" and _main_tracks_origin_main(cfg) else "upstream: none")
+    if not cfg.repo:
+        # A diagnostic run with no MIND_REPO configured at all: nothing to
+        # probe, but still report every other line that needs no repo.
+        lines.append("remote: unreachable (MIND_REPO not set)")
+    else:
+        reachable, info = _remote_reachable(cfg)
+        lines.append(f"remote: reachable ({info} ms)" if reachable else f"remote: unreachable ({_redact(str(info), cfg)})")
     email = _git_user_email(cfg)
     lines.append(f"identity: {email or 'none, will use mind@localhost'}")
     version_proc = _gh(cfg, ["--version"], cfg.home)
@@ -1575,12 +1594,19 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
         except Exception:
             pass
         return 0
+    if args.cmd == "doctor":
+        # A diagnostic command must never exit 1 just because MIND_REPO is
+        # unset -- that is exactly the kind of misconfiguration a second
+        # machine or a cloud session needs it to explain.
+        cfg = Config.from_env(env, cwd, require_repo=False)
+        print(cmd_doctor(cfg))
+        return 0
     try:
         cfg = Config.from_env(env, cwd)
     except ConfigError as exc:
         print(f"mind: {exc}", file=sys.stderr)
         return 1
-    if args.cmd not in ("reindex", "doctor"):
+    if args.cmd != "reindex":   # "doctor" already returned above
         clone_failed = ensure_checkout(cfg)
         if clone_failed:
             # Unlike inject (the session-start hook, which must never block
@@ -1632,8 +1658,6 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
             msg = cmd_lint(cfg, args.days)
         elif args.cmd == "settings":
             msg = cmd_settings(cfg, args.sets)
-        elif args.cmd == "doctor":
-            msg = cmd_doctor(cfg)
     except ValidationError as exc:
         print(f"mind: {exc}", file=sys.stderr)
         return 1
