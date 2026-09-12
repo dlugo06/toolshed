@@ -2,7 +2,7 @@
 
 `mind` is the owner's engineering memory: principles, preferences, decisions, procedures, gotchas, and references, both universal and per project. Agents consult it before asking the owner, apply what it says, and cite the note ID. It works on every machine and in cloud agent sessions, so the content cannot live in this public repo or in a per-machine file.
 
-Split: **code** lives here, in `plugins/mind`, owner-agnostic, configured by environment variables, public. **Content** lives in a private git repo the owner controls (the "data repo"). The plugin clones it, reads it at session start, and writes to it through `/mind:remember`. Git is the sync channel, the history, and the review surface.
+Split: **code** lives here, in `plugins/mind`, owner-agnostic, configured by environment variables, public. **Content** lives in a private git repo the owner controls (the "data repo"). The plugin clones it, reads it at session start, and writes to it through `/mind:remember`. Git is the sync channel, the history, and the review surface. Every session injects that repo's content as unlabelled, high-trust instructions: treat write access to `MIND_REPO` as write access to your agent's instructions, the same as you would a CLAUDE.md.
 
 ## Setup
 
@@ -10,6 +10,8 @@ Split: **code** lives here, in `plugins/mind`, owner-agnostic, configured by env
 claude plugin install mind@toolshed
 export MIND_REPO=git@github.com:<owner>/<data-repo>.git
 ```
+
+`MIND_REPO` must be one of the documented forms: `ssh://...`, `git@host:...`, `https://...`, `file://...`, or an absolute path. Anything else (e.g. a `ext::` transport) is rejected before any git call is made.
 
 Optional environment variables: `MIND_HOME` (checkout path; defaults to `${CLAUDE_PLUGIN_DATA}/repo`, falling back to `~/.mind/repo`), `MIND_TOKEN` (a token for https remotes, used for cloud sessions where SSH isn't available), `MIND_PROJECT` (force the project slug for this session).
 
@@ -64,7 +66,7 @@ Required fields on `add`: `title`, `type`, `stage`, `strength`. Defaults: `statu
 
 ## Session start
 
-`hooks/hooks.json` registers a SessionStart command hook on `startup|resume|clear|compact` running `scripts/session-start.sh`, which exits 0 doing nothing when `MIND_REPO`, `python3`, or `git` is missing, and otherwise runs `mind.py inject --event <source>`. On `startup` and `resume` it pulls first (10 s timeout; a failure prints an offline line and continues with the cached copy); `clear` and `compact` never touch the network.
+`hooks/hooks.json` registers a SessionStart command hook on `startup|resume|clear|compact` running `scripts/session-start.sh`, which exits 0 doing nothing when `MIND_REPO`, `python3`, or `git` is missing, and otherwise runs `mind.py inject --event <source>`. On `startup` and `resume` it syncs first: pull (10 s timeout), then push any local commit that is still unpushed (e.g. from a `/mind:remember` whose own push earlier failed) — a failure at either step prints one line and continues with the cached copy; `clear` and `compact` never touch the network.
 
 It prints, in order: the protocol line, the global index, the current project's index (or "no notes for `<candidate>` yet"), the projects index, and the draft count when non-zero ("1 draft awaits acceptance" or "N drafts await acceptance: run /mind:ask --drafts"). The three indexes together are capped at 4,000 characters (`INDEX_BUDGET`): the global index is truncated first, then the project index, and the projects index is never truncated. Within a truncated section, every `must`-strength row is kept first, then one row per stage in round-robin order, so a large mind never hides a whole stage or a hard rule under a tight budget.
 
@@ -80,7 +82,7 @@ One script, `scripts/mind.py`, stdlib only:
 | Subcommand | Does |
 |---|---|
 | `init` | write `schema.md`, create `global/` and `projects/`, commit, push |
-| `inject --event E` | pull (on `startup`/`resume`), print the budgeted indexes and draft count |
+| `inject --event E` | sync — pull, then push if ahead (on `startup`/`resume`) — print the budgeted indexes, draft count, and malformed-note count |
 | `add <draft.md> --scope global\|project [--project slug]` | validate frontmatter, assign ID, write the note, reindex, commit `mind: add <ID> <title>`, sync, print the ID and sync outcome |
 | `ask <terms...> [--all] [--project slug] [--drafts]` | whole-word, case-insensitive term match over title and body of accepted notes in global plus the current project (`--all`: every project); rank by terms hit; print up to 10 rows |
 | `reindex` | regenerate every `index.md` from notes |
@@ -92,10 +94,13 @@ One script, `scripts/mind.py`, stdlib only:
 - Authentication: SSH on the owner's machines. In cloud sessions `MIND_REPO` is an https URL and `MIND_TOKEN` is set; the token is passed to git through a credential helper on the command line (username `x-access-token`), never written to disk. An empty `credential.helper=` is emitted first to reset any helper configured earlier (global osxkeychain, `gh`, etc.), so only ours answers and none of them persists the token.
 - Timeouts: clone 30 s, pull 10 s, push 20 s.
 - The hook never blocks a session: every failure path prints one line and exits 0.
-- `add` writes the note and commits before any network call. A failed push leaves the commit local and prints "mind: push failed, note is committed locally; it will push on the next remember or session start". The next `add` or `inject` retries the push.
+- `add` writes the note and commits before any network call. A failed push leaves the commit local and prints "mind: push failed, note is committed locally; it will push on the next remember or session start" — true: `inject` on `startup`/`resume` syncs, not just pulls, so that commit goes out on the next session start even if the owner never runs `/mind:remember` again.
 - ID collision: after the pull that precedes writing, and again after a successful rebase, `add` scans the notes folder for another file carrying the ID it just assigned. If one exists, the local note takes the next free ID and the commit is amended before the push.
 - A rebase that conflicts on any file (only hand edits can cause this, since indexes are gitignored) is aborted and reported as `mind: sync conflict in <file>, resolve by hand in <home>`, never as offline.
-- Project slugs (from `MIND_PROJECT`, the origin URL, or a directory name) are sanitized to `[a-z0-9][a-z0-9._-]*`; a slug that sanitizes to empty (e.g. `..`) is rejected.
+- Pull/rebase failures are classified, not all called "offline": no upstream branch yet (a brand-new empty data repo) prints `mind: first run, nothing to pull yet`; a timeout or a network/auth-shaped error prints `mind: offline, using cached copy from <date>`; anything else (a genuinely diverged branch, a corrupt repo) prints `mind: sync blocked: <last git error line>`, since that needs the owner's attention and is not a transient blip.
+- A checkout with a `.git/` directory but no usable HEAD and no valid empty repo (e.g. a clone the timeout killed mid-transfer) is reported as `mind: checkout at <home> is broken, delete it and rerun`, rather than silently passing as an empty-but-healthy checkout.
+- A malformed note (frontmatter that fails the schema, or an id that doesn't match the ID shape) never appears in any index; `inject` reports how many were skipped and where to look.
+- Project slugs (from `MIND_PROJECT`, the origin URL, or a directory name) are sanitized to `[a-z0-9][a-z0-9._-]*`; a slug that sanitizes to empty (e.g. `..`) is rejected. `accept <slug>/<ID>` validates the slug the same way, so a path-traversal ID can never read or rewrite a file outside `MIND_HOME`.
 
 ## Tests
 
