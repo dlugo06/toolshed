@@ -822,6 +822,13 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
         errs = validate_meta(meta)
         if errs:
             raise ValidationError(f"{d.name}: " + "; ".join(errs))
+        sup = meta.get("supersedes")
+        if sup and _find_note(cfg, sup) is None:
+            # Before the worktree even exists: a dangling `supersedes` must
+            # reject the whole batch, not silently no-op and open a PR the
+            # owner reviews with the old note still `accepted` (lint only
+            # catches it later).
+            raise ValidationError(f"{d.name}: supersedes {sup} not found")
         parsed.append((d, meta, text, draft_scope))
     topic_slug = _slugify(topic)
     _validate_slug(topic_slug)

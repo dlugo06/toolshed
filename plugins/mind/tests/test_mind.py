@@ -1698,6 +1698,23 @@ def test_cmd_propose_supersedes_flips_old_note_in_branch(repo, tmp_path, monkeyp
     assert "status: superseded" in shown
 
 
+def test_cmd_propose_raises_when_supersedes_target_is_missing(repo, tmp_path, monkeypatch):
+    """L: a draft naming a nonexistent ID in `supersedes` must be rejected
+    before the worktree is even created, not silently ignored -- the review
+    skill's revise flow would otherwise open a PR with a dangling reference
+    that only `lint` catches later."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "n.md"
+    d.write_text("---\ntitle: New rule\ntype: preference\nstage: review\nstrength: should\nsupersedes: PREF-REV-999\n---\nnew\n")
+    with pytest.raises(mind.ValidationError, match="n.md: supersedes PREF-REV-999 not found"):
+        mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert not list(cfg.home.parent.glob("worktree-*"))
+    assert _git(["branch", "--list", "propose/*"], cfg.home).stdout == ""
+
+
 def test_cmd_proposals_lists_open_branches(repo, monkeypatch):
     cfg, _, seed = repo
     mind.cmd_init(cfg)
