@@ -39,6 +39,21 @@ def test_hook_is_silent_without_mind_repo(tmp_path):
     assert proc.stdout == ""
 
 
+def test_main_add_reports_clone_failure_on_stderr_and_returns_1(tmp_path, capsys):
+    """Only inject (the session-start hook) may swallow a clone failure and
+    exit 0; every other command must fail loudly, or the owner sees a
+    silent no-op 'mind: added ..., pushed'-shaped success that never wrote
+    anything at all."""
+    env = {"MIND_REPO": str(tmp_path / "missing.git"), "MIND_HOME": str(tmp_path / "h")}
+    draft = tmp_path / "d.md"
+    draft.write_text(NOTE)
+    rc = mind.main(["add", str(draft), "--scope", "global"], env=env, cwd=tmp_path)
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("mind: clone failed")
+
+
 def test_main_unknown_subcommand_returns_2(capsys):
     assert mind.main(["bogus"], env={}, cwd=Path(".")) == 2
     assert "usage: mind.py" in capsys.readouterr().err

@@ -715,20 +715,29 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
             return 0
         print(msg)
         return 0
+    if args.cmd != "reindex":
+        clone_failed = ensure_checkout(cfg)
+        if clone_failed:
+            # Unlike inject (the session-start hook, which must never block
+            # a session), every other command's whole point is to write or
+            # read notes: silently reporting success with nothing done
+            # would be worse than failing loudly.
+            print(clone_failed, file=sys.stderr)
+            return 1
     try:
         if args.cmd == "init":
-            msg = ensure_checkout(cfg) or cmd_init(cfg)
+            msg = cmd_init(cfg)
         elif args.cmd == "add":
-            msg = ensure_checkout(cfg) or cmd_add(cfg, Path(args.draft), args.scope, args.project, cwd)
+            msg = cmd_add(cfg, Path(args.draft), args.scope, args.project, cwd)
         elif args.cmd == "accept":
-            msg = ensure_checkout(cfg) or cmd_accept(cfg, args.note_id)
+            msg = cmd_accept(cfg, args.note_id)
         elif args.cmd == "ask":
-            msg = ensure_checkout(cfg) or cmd_ask(cfg, args.terms, args.all, args.project, args.drafts, cwd)
+            msg = cmd_ask(cfg, args.terms, args.all, args.project, args.drafts, cwd)
         elif args.cmd == "reindex":
             reindex(cfg)
             msg = "mind: reindexed"
         elif args.cmd == "sync":
-            msg = ensure_checkout(cfg) or sync(cfg, pull_only=args.pull_only) or "mind: in sync"
+            msg = sync(cfg, pull_only=args.pull_only) or "mind: in sync"
         else:
             print(USAGE, file=sys.stderr)
             return 2
