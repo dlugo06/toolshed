@@ -124,7 +124,7 @@ def load_notes(notes_dir: Path) -> list[Note]:
     if not notes_dir.is_dir():
         return notes
     for path in sorted(notes_dir.glob("*.md")):
-        meta, body = parse_frontmatter(path.read_text())
+        meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
         if _is_well_formed(meta):
             notes.append(Note(path, meta, body))
     return notes
@@ -137,7 +137,7 @@ def _malformed_count(cfg: Config) -> int:
         if not d.is_dir():
             continue
         for path in d.glob("*.md"):
-            meta, _ = parse_frontmatter(path.read_text())
+            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
             if not _is_well_formed(meta):
                 count += 1
     return count
@@ -483,7 +483,7 @@ def resolve_candidate(cfg: Config, cwd: Path) -> str:
 
 
 def load_project(cfg: Config, slug: str) -> tuple[dict, str]:
-    return parse_frontmatter((cfg.home / "projects" / slug / "project.md").read_text())
+    return parse_frontmatter((cfg.home / "projects" / slug / "project.md").read_text(encoding="utf-8"))
 
 
 def list_projects(cfg: Config) -> list[str]:
@@ -559,11 +559,13 @@ def build_projects_index(cfg: Config) -> str:
 
 def reindex(cfg: Config) -> None:
     (cfg.home / "global").mkdir(parents=True, exist_ok=True)
-    (cfg.home / "global" / "index.md").write_text(build_index(load_notes(global_notes_dir(cfg)), "Global"))
+    (cfg.home / "global" / "index.md").write_text(
+        build_index(load_notes(global_notes_dir(cfg)), "Global"), encoding="utf-8")
     (cfg.home / "projects").mkdir(exist_ok=True)
-    (cfg.home / "projects" / "index.md").write_text(build_projects_index(cfg))
+    (cfg.home / "projects" / "index.md").write_text(build_projects_index(cfg), encoding="utf-8")
     for slug in list_projects(cfg):
-        (cfg.home / "projects" / slug / "index.md").write_text(build_index(load_notes(project_notes_dir(cfg, slug)), slug))
+        (cfg.home / "projects" / slug / "index.md").write_text(
+            build_index(load_notes(project_notes_dir(cfg, slug)), slug), encoding="utf-8")
 
 
 class ValidationError(Exception):
@@ -580,11 +582,11 @@ def _today() -> str:
 
 def cmd_init(cfg: Config) -> str:
     schema = Path(__file__).resolve().parents[1] / "templates" / "schema.md"
-    (cfg.home / "schema.md").write_text(schema.read_text())
+    (cfg.home / "schema.md").write_text(schema.read_text(encoding="utf-8"), encoding="utf-8")
     # Indexes are generated from notes, never hand-edited, and never committed:
     # two machines regenerating the same index.md would otherwise be the one
     # file every concurrent add/accept can conflict on.
-    (cfg.home / ".gitignore").write_text("**/index.md\n")
+    (cfg.home / ".gitignore").write_text("**/index.md\n", encoding="utf-8")
     global_notes_dir(cfg).mkdir(parents=True, exist_ok=True)
     (cfg.home / "projects").mkdir(exist_ok=True)
     reindex(cfg)
@@ -603,7 +605,7 @@ def _ensure_project(cfg: Config, slug: str) -> bool:
         return False
     (d / "notes").mkdir(parents=True, exist_ok=True)
     meta = {"slug": slug, "name": slug, "repo": None, "stack": [], "aliases": [], "related": [], "updated": _today()}
-    (d / "project.md").write_text(render_frontmatter(meta, STUB_PROJECT_BODY))
+    (d / "project.md").write_text(render_frontmatter(meta, STUB_PROJECT_BODY), encoding="utf-8")
     return True
 
 
@@ -611,7 +613,7 @@ def _write_note(cfg: Config, notes_dir: Path, meta: dict, body: str) -> Path:
     meta["id"] = next_id(notes_dir, meta["type"], meta["stage"])
     ordered = {k: meta.get(k) for k in ["id", "title", "type", "stage", "scope", "strength", "status", "affirmed", "supersedes", "source"]}
     path = notes_dir / f"{ordered['id']}-{_kebab(ordered['title'])}.md"
-    path.write_text(render_frontmatter(ordered, body))
+    path.write_text(render_frontmatter(ordered, body), encoding="utf-8")
     return path
 
 
@@ -624,7 +626,7 @@ def _find_collision(notes_dir: Path, note_id: str, path: Path) -> Path | None:
 
 
 def cmd_add(cfg: Config, draft: Path, scope: str, project: str | None, cwd: Path) -> str:
-    meta, body = parse_frontmatter(draft.read_text())
+    meta, body = parse_frontmatter(draft.read_text(encoding="utf-8"))
     errs = validate_meta(meta)
     if errs:
         raise ValidationError("; ".join(errs))
@@ -672,7 +674,7 @@ def cmd_add(cfg: Config, draft: Path, scope: str, project: str | None, cwd: Path
                 # one that goes out.
                 _require_commit(_amend_all(cfg, f"mind: add {meta['id']} {meta['title']}"))
             msg = push(cfg)
-    note_id = parse_frontmatter(path.read_text())[0]["id"]
+    note_id = parse_frontmatter(path.read_text(encoding="utf-8"))[0]["id"]
     scope_label = "global" if scope == "global" else f"project {prefix[:-1]}"
     result = f"mind: added {prefix}{note_id} ({scope_label}), "
     if pre_msg:
@@ -709,7 +711,7 @@ def cmd_accept(cfg: Config, note_id: str) -> str:
         raise ValidationError(f"no note with id {note_id}")
     note.meta["status"] = "accepted"
     note.meta["affirmed"] = _today()
-    note.path.write_text(render_frontmatter(note.meta, note.body))
+    note.path.write_text(render_frontmatter(note.meta, note.body), encoding="utf-8")
     reindex(cfg)
     _require_commit(commit_all(cfg, f"mind: accept {note_id}"))
     msg = sync(cfg)
@@ -844,7 +846,7 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
         # the owner they have zero projects, a wrong answer rather than an
         # error.
         reindex(cfg)
-    projects_idx = projects_index_path.read_text() if projects_index_path.is_file() else "# Projects\n"
+    projects_idx = projects_index_path.read_text(encoding="utf-8") if projects_index_path.is_file() else "# Projects\n"
     global_idx, project_idx = _fit(global_notes, "Global", project_notes, project_heading, projects_idx)
     out += ["\n" + global_idx, "\n" + project_idx, "\n" + projects_idx]
     drafts = _draft_count(cfg)
