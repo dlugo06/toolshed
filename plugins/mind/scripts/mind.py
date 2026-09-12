@@ -766,11 +766,17 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
     git(cfg, ["fetch", "-q", "origin"], cfg.home, GIT_TIMEOUTS["pull"])
     wt = _worktree_path(cfg, branch)
     remote_has = git(cfg, ["rev-parse", "--verify", "-q", f"origin/{branch}"], cfg.home, 5).returncode == 0
-    start = f"origin/{branch}" if remote_has else "origin/main"
-    if not _has_upstream(cfg) and not remote_has:
-        start = "HEAD"
-    add_args = (["worktree", "add", "-q", "--", str(wt), start] if remote_has
-                else ["worktree", "add", "-q", "-b", branch, "--", str(wt), start])
+    local_has = git(cfg, ["rev-parse", "--verify", "-q", f"refs/heads/{branch}"], cfg.home, 5).returncode == 0
+    # Order matters: a retry after a failed push (branch committed locally,
+    # never reached the remote) must append to that same local branch, not
+    # die on `worktree add -b` because the branch already exists.
+    if remote_has:
+        add_args = ["worktree", "add", "-q", "--", str(wt), f"origin/{branch}"]
+    elif local_has:
+        add_args = ["worktree", "add", "-q", "--", str(wt), branch]
+    else:
+        start = "HEAD" if not _has_upstream(cfg) else "origin/main"
+        add_args = ["worktree", "add", "-q", "-b", branch, "--", str(wt), start]
     proc = git(cfg, add_args, cfg.home, 20)
     if proc.returncode != 0:
         raise ValidationError("worktree failed: " + _redact((proc.stderr.strip().splitlines() or ["unknown"])[-1], cfg))

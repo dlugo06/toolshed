@@ -1739,6 +1739,37 @@ def test_cmd_propose_push_failure_keeps_branch_locally(repo, tmp_path, monkeypat
     assert _git(["branch", "--list", "propose/2026-09-12-x"], cfg.home).stdout.strip() == "propose/2026-09-12-x"
 
 
+def test_cmd_propose_retries_after_failed_push_reusing_local_branch(repo, tmp_path, monkeypatch):
+    """H3: after a failed push the branch exists locally only. Proposing
+    again the same day under the same topic (the digest skill's topic is
+    always `digest-<date>`, so a retry is the same topic by construction)
+    must append to that branch rather than die on `worktree add -b` because
+    the branch already exists, and must push everything out."""
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    real_git = mind.git
+    fail = {"on": True}
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:1] == ["push"] and fail["on"]:
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="fatal: push failed\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
+    out1 = mind.cmd_propose(cfg, [d1], "x", "global", None, None, tmp_path)
+    assert out1 == "mind: proposal branch propose/2026-09-12-x is committed locally; push failed"
+
+    fail["on"] = False
+    d2 = tmp_path / "b.md"; d2.write_text(DRAFT.replace("Tests must assert concrete values", "Second claim"))
+    out2 = mind.cmd_propose(cfg, [d2], "x", "global", None, None, tmp_path)
+    assert out2 == "mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+    log = _git(["log", "--format=%s", "propose/2026-09-12-x", "-2"], bare).stdout.splitlines()
+    assert log == ["mind: propose PRIN-TEST-002 Second claim", "mind: propose PRIN-TEST-001 Tests must assert concrete values"]
+
+
 def test_cmd_propose_reuses_existing_branch_and_pr(repo, tmp_path, monkeypatch):
     """Given propose/2026-09-12-x already exists on origin with PRIN-TEST-001
     (from a prior cmd_propose call) / a second cmd_propose call omits -b from
