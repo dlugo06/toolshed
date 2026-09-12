@@ -161,7 +161,10 @@ def git_base_args(cfg: Config) -> list[str]:
     args = ["git"]
     if cfg.token:
         helper = "!f() { echo username=x-access-token; echo password=$MIND_TOKEN; }; f"
-        args += ["-c", f"credential.helper={helper}"]
+        # An empty credential.helper resets any helpers configured earlier
+        # (global osxkeychain, gh, etc.) so only ours answers and none of
+        # them gets a chance to persist the cloud token to disk.
+        args += ["-c", "credential.helper=", "-c", f"credential.helper={helper}"]
     if not _has_configured_identity(cfg):
         # A fresh clone (a cloud container, most often) may have no identity
         # configured anywhere; without one, `git commit` fails outright.

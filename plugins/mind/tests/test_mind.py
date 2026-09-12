@@ -630,6 +630,20 @@ def test_cmd_add_raises_on_commit_failure_and_keeps_earlier_unpushed_commit(repo
     assert log[0] == "mind: earlier unpushed"
 
 
+def test_git_base_args_resets_credential_helpers_before_custom_one(repo):
+    """Without an explicit reset, a configured osxkeychain/gh helper answers
+    first and (on success) every configured helper's store action runs too,
+    persisting the cloud token to the owner's real keychain."""
+    cfg, _, _ = repo
+    cfg = dataclasses.replace(cfg, token="tok")
+    args = mind.git_base_args(cfg)
+    reset_idx = args.index("credential.helper=")
+    custom_idx = next(i for i, a in enumerate(args) if a.startswith("credential.helper=") and a != "credential.helper=")
+    assert args[reset_idx - 1] == "-c"
+    assert args[custom_idx - 1] == "-c"
+    assert reset_idx < custom_idx
+
+
 def test_git_base_args_adds_identity_only_when_git_config_has_none(repo):
     """A fresh clone (e.g. a cloud container) has no configured git identity
     at all: git_base_args must supply one so commit_all does not fail with
