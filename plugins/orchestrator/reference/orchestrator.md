@@ -57,7 +57,7 @@ The `stage` field is a claim. Before acting on an item, check the claim against 
 |---|---|
 | `impact_checked` | `.dev/BEHAVIORAL_IMPACT_<branch>.md` exists for this branch |
 | `tests_planned` | `.dev/test-plan-<branch>.md` exists for this branch |
-| `evaluated` | the whole-branch review report names the current HEAD |
+| `evaluated` | the whole-branch review report exists for the branch, and either it accepted no findings or the fix-wave report names the current HEAD with the suite counts (the standard and fix tiers have no re-review agent, so the fix report is the evidence that the review was applied) |
 | `shipped` | the PR exists and `gh pr view <pr> --json reviews,comments` shows the reviewers' posts, or `.dev/*_REVIEW_PR<pr>.md` exists |
 | `review_processed` | the decision table is on the PR and the fix commit is pushed |
 
@@ -94,7 +94,7 @@ The tier is chosen at `idea -> specced` from what the item is, recorded as `tier
 | tier | when | agent cap |
 |---|---|---|
 | `fix` | a bug with a reproduction or trace (Sentry issue, failing test, log), a behaviour change confined to one subsystem, a test-gap remediation | 8 |
-| `standard` | a feature inside existing architecture, or a fix that touches more than one subsystem | 12 |
+| `standard` | a feature inside existing architecture, or a fix that touches more than one subsystem | 14 |
 | `full` | a phase's foundational task, a new subsystem, a new dependency, migration, new egress or route, secret or config schema change | 20 |
 
 "Config schema change" means a new required environment variable, a new secret, or a changed type or validator on an existing setting. A new optional setting with a safe default (a feature toggle, a TTL) is not one; it stays in the tier the rest of the item earns.
@@ -104,6 +104,8 @@ The cap counts every `Agent` dispatch made for the item from `specced` to `revie
 Token guideline per tier, for the whole pipeline of one item (subagent tokens as reported in completion notices): `fix` ≈ 1.0M, `standard` ≈ 2.0M, `full` ≈ 4.0M. Two `fix` items that cost 3M between them exhausted an account's 5-hour window. When a single dispatch exceeds a third of the tier's guideline, the report says so and names the cause (usually: the brief made the agent re-read the repository, or the agent re-ran suites).
 
 Reference costs from a clean 2026-09-10 `fix` run (Sonnet unless noted): impact checker 95-113k, test planner 121-125k, implementer 135-143k, whole-branch reviewer 93-106k, combined PR reviewer (Opus) 105k, fix wave 81-154k. Two items, 14 dispatches, 1.66M. A dispatch far above its band is re-reading the repository or re-running suites; a fix wave near the top of its band is doing predicate work the spec should have settled.
+
+Reference costs from a clean 2026-09-11 `standard` run (one item, 13 dispatches, 2.18M): two read-only Haiku audits 65-78k, impact checker 165k (28 specs, spec-corpus mode), test planner 141k, two implementers 232-254k, whole-branch reviewer (Opus) 165k, review-tests 186k, first fix wave 352k (14 fixes in one agent), three PR reviewers (Opus) 85-140k, second fix wave 201k. The two fix waves and the two implementers were 60% of the item; a fix wave above ~150k should have been two dispatches (see the `implementing -> review` row).
 
 Every dispatch also pays the session's fixed prompt: the agent roster, the skill listing, the MCP tool names and `CLAUDE.md`. In the reference project that is ~14k tokens per request, of which roughly 10k is agents, skills and MCP servers the project never uses. The owner keeps a per-project overhead inventory in the session notes; trimming it is done in the project's plugin and MCP configuration, not in briefs.
 
@@ -121,13 +123,19 @@ Spec rule for every tier: before a spec states a classification predicate (a reg
 
 The spec also names the language and audience of every user-facing string it introduces or changes, and checks it against the project's language rule in `CLAUDE.md` when one exists. An English placeholder in a Spanish-only product reached a salesperson because the spec described the string's shape and not its language.
 
+When a spec adds a field, flag or value that must reach an output surface (a message line, a payload field), it names the functions that render that surface (`git grep -n '<render function>('`) and the object each call site consumes. A 2026-09-11 spec set a flag on an in-memory result while every message was re-projected from the database row before formatting; the flag never reached the user, six tests passed against the discarded object, and an Opus review plus a fix wave were the cost of finding it.
+
+The plan (`superpowers:writing-plans`) is checked before it is committed: every helper or fixture signature the plan quotes is confirmed with one `git grep -n 'def <name>'`; every literal the plan changes is `git grep`'d across `tests/` and the hits are named as tests the change will break; an expected output the plan writes for a regex or normaliser is produced by running it, not by hand. Two of the three plan defects an implementer had to correct in one run were a hand-written regex expectation and a kwarg the helper did not have.
+
 The spec is written while other agents run when it can be. Writing the next item's spec and plan in the main session during a dispatch wait cost ~40k main-session tokens and zero agent tokens on 2026-09-10.
+
+Behaviour register: when the project keeps `docs/behaviour-register.md` (template in `dev-kit/templates/`), `check-impact` diffs the plan against it instead of the spec corpus, and `ship` appends the rows the impact report proposed. A project past roughly fifteen specs seeds one with `/dev-kit:check-impact --seed-register`; reading every spec on every run grows linearly and does not scale.
 | specced | check impact | `/dev-kit:check-impact` (Sonnet); it also verifies every classification predicate in the plan against the code's raise sites | same | same |
 | impact_checked | plan tests | `/dev-kit:plan-tests --fix` (Sonnet, 15-25 scenarios) | `/dev-kit:plan-tests` (30-50) | same as standard |
-| tests_planned | implement | one implementer per batch of related tasks (Sonnet), briefed from the plan, no per-task reviewer | same | one implementer per task (Sonnet), one task reviewer per task (Sonnet), fix rounds capped at 2 |
-| implementing | review | one whole-branch reviewer (Sonnet on `fix`, Opus otherwise) with the plan and the item's `steps_to_verify`; it reports spec compliance, the verification checklist, correctness, and simplification findings in one pass; one fix dispatch (Sonnet) for its findings, no re-review agent | same, plus `/dev-kit:review-tests` (Sonnet) before the fix dispatch | same as standard, plus the fresh-context evaluator (Sonnet) using the project's evaluator prompt |
+| tests_planned | implement | one implementer per batch of related tasks (Sonnet), briefed from the plan, no per-task reviewer; the brief scopes tests to "plan-named tests plus the scenario map's Critical rows", never "at your judgement" | same | one implementer per task (Sonnet), one task reviewer per task (Sonnet), fix rounds capped at 2 |
+| implementing | review | one whole-branch reviewer (Sonnet on `fix`, Opus otherwise) with the plan and the item's `steps_to_verify`; it reports spec compliance, the verification checklist, correctness, and simplification findings in one pass; one fix dispatch (Sonnet) for its findings, no re-review agent | same, plus `/dev-kit:review-tests` (Sonnet) dispatched in the same message as the reviewer (both are read-only); the rulings on both reports go into one brief, and when the accepted rows split into source fixes and test hygiene (deletions, fixtures) they go to two Sonnet fix dispatches in parallel, each in the 81-154k band, instead of one agent doing fourteen fixes at 352k | same as standard, plus the fresh-context evaluator (Sonnet) using the project's evaluator prompt |
 | evaluated | ship | `/dev-kit:ship --reviewed --fix` (the whole-branch review already covered the spec and simplification, so ship skips both); one reviewer per §Ship tier | `/dev-kit:ship --reviewed` | `/dev-kit:ship --reviewed --full` |
-| shipped | process review | `/dev-kit:process-review <pr>`: the decision table, then one fix dispatch (Sonnet), no re-review agent | same | same |
+| shipped | process review | `/dev-kit:process-review <pr> --autonomous`: the decision table ruled from the plan's Rulings, the PR body's Rulings and stored preferences, posted on the PR, then one fix dispatch (Sonnet), no re-review agent | same | same |
 | review_processed | merge | HUMAN GATE. Report, stop. | same | same |
 | merged | passes: true | HUMAN GATE. Merged means deployed. The owner verifies manually and confirms; only then set `passes`. Report, stop. | same | same |
 
@@ -172,6 +180,8 @@ Implementers run the covering tests per task and the full suites once before the
 
 For reference, a `fix` item that goes cleanly through the pipeline dispatches: impact checker, test planner, one or two implementers, one whole-branch reviewer (Sonnet), one fix dispatch, one combined PR reviewer (Opus), one process-review fixer. That is seven to eight agents, one of them on Opus, inside the cap of 8. A run that dispatches per-task reviewers, re-reviewers, a separate spec checker, a separate evaluator, three PR reviewers, and a multi-agent simplify pass costs three to four times that for the same diff.
 
+A clean `standard` item dispatches: impact checker, test planner, two implementers, the whole-branch reviewer (Opus) and review-tests, one or two fix dispatches, three PR reviewers (Opus), one process-review fixer: twelve to thirteen, inside the cap of 14. Read-only audits the owner asks for before the spec (a Haiku explore per question set) count too.
+
 ## Selecting work (`next`)
 
 1. Exclude items whose `disposition` is `defer`, `drop`, or `fold`, and items with an open blocker in `depends_on`.
@@ -196,7 +206,9 @@ For every open item in a project propose one of `keep`, `fold: <target>`, `defer
 - Input contract for every dispatch (this is the token budget's only enforcement point): the brief is under 150 words; it names ONE plan or brief path, ONE report path to write, and the path of the previous stage's report to read; it never lists spec + plan + test plan + impact report together (the plan already summarises them). Agents read the diff or plan once, read full files only for the functions they touch, and end their report with one line naming what they did not read.
 - Fix-wave and implementer agents commit after every task or fix, so a killed agent (rate limit, timeout) leaves committed, attributable work instead of an uncommitted tree. They never add verification steps the brief did not ask for (no Docker builds, no extra suites).
 - Implementer briefs say: a pre-existing test that breaks and is not named in the plan is *reported*, not patched. An implementer once re-pointed a third test at the old behaviour to keep it green; it was the one test that encoded the behaviour the item was changing, and the reviewer had to find it.
-- Every brief that dispatches an agent into a project with permission hooks says which lookups are blocked and what to use instead (in the reference project: Bash `grep` is denied, `git grep` and `Read` work; `.env*` is unreadable even as `.env.example`). Twelve denied calls across one session came from agents and the orchestrator discovering this one at a time. A plan step that edits `.env.example` cannot be executed by an agent; document new settings in the settings module and leave the example file to the owner.
+- Every brief that dispatches an agent into a project with permission hooks says which lookups are blocked and what to use instead (in the reference project: Bash `grep` and `sed` are denied, `git grep` and `Read` work; `.env*` is unreadable even as `.env.example`). The orchestrator's own commands obey the same list: file ranges are read with the Read tool, not `sed -n`. Twelve denied calls across one session came from agents and the orchestrator discovering this one at a time; three more the next day came from the orchestrator itself.
+- A read-only audit brief (an explore agent asked "which strings are English", "which literals are magic") names what is *not* a finding: brand names, values that only reach logs, fields another function already normalises, single-use locals. Two Haiku audits returned 15 and 19 rows of which 1 and 5 were real; the verdict pass costs the controller more than the audit did.
+- The SessionStart brief runs `status.py --brief --git --gh`; `--git` reports when the local default branch is behind origin. Four merged PRs were listed at the merge gate because the checkout was one commit behind. `git fetch origin` and a fast-forward before any branch is cut. A plan step that edits `.env.example` cannot be executed by an agent; document new settings in the settings module and leave the example file to the owner.
 - Reviewer briefs (whole-branch and PR) name the plan's "Rulings" section as decided: a trade-off the spec or a prior ruling accepted is not re-opened as a finding. A PR reviewer once filed the loss of a code path the item existed to remove as a silent-failure regression.
 - The orchestrator stages by named path, never `git add -A` or `git add <dir>`; a following item's untracked spec and plan were staged into the wrong branch's index that way.
 - PR bodies and decision tables go through `--body-file` from the scratch directory, and `git push` and `gh pr create` are separate calls; project hooks that scan command text for protected names deny inline heredocs and `&&` chains that mention them.

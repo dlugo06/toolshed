@@ -7,6 +7,8 @@ Generate test scenario plans for the current branch's implementation plan.
 
 Arguments: `[plan path] [--fix|--standard|--full]`. The tier bounds the plan: `--fix` targets 15-25 scenarios, `--standard` 30-50, `--full` as many as the tasks need. Default `--standard`. A 53-scenario plan for a fix-tier bundle once produced 1,400 lines of tests for 300 lines of code; the bound exists for that reason.
 
+The bound is on tests written, not only on rows listed. Every row is marked **Critical** or **Defensive**, and the implementer brief says: "write the plan-named tests plus the Critical rows; Defensive rows are not implemented unless the brief lists them by name". A 42-row standard-tier map inside the bound still produced +2,300 test lines for ~150 source lines because both implementers added "curated" Defensive rows; the whole-branch reviewer then named ~350 of those lines as redundant and a fix wave deleted them.
+
 Launch the **test-scenario-planner** agent (`model: "sonnet"`, passed explicitly) to analyze the implementation plan, read the source it touches, and produce a structured Given/When/Then scenario map per task. Run this after `writing-plans` and `/dev-kit:check-impact`, and before implementation. The brief is under 150 words: the plan path, the tier, the impact report path, the output path.
 
 ## Pre-check

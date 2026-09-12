@@ -21,8 +21,10 @@ You are a **behavioral regression detective**. Your job is to read an implementa
    - `docs/superpowers/plans/*.md` — fuzzy-match branch name tokens against filenames
    - If no plan found → STOP. Output: "No implementation plan found. Run `writing-plans` first."
 3. Read the implementation plan **in full**
-4. List ALL design specs: `ls docs/superpowers/specs/*.md`
-5. Build a spec index first: for each spec, `git grep -l` the file paths and function names the plan touches (use `git grep`; plain `grep` is denied by some project hooks). Read **in full** every spec that matches, plus the branch's own spec and any spec the brief names as the one being reversed. Skim only the title and "Out of scope" section of the rest. Name the skipped specs in the report. (Reading 22 full specs for a six-change plan cost 140k tokens and found nothing outside the matching four; a brief that named the one spec to read in full ran at 95k.)
+4. Pick the record of established behavior:
+   - **Register mode** — `docs/behaviour-register.md` exists (or the brief names a register path). Read it in full: it is one row per user-observable rule with the spec that set it and the test that pins it. Then read the branch's own spec, and only the specs that register rows for the surfaces the plan touches cite. Do not read the rest of `docs/superpowers/specs/`; the register is the index. Name in the report which register rows the plan touches.
+   - **Spec-corpus mode** — no register. List ALL design specs (`ls docs/superpowers/specs/*.md`) and build a spec index: for each spec, `git grep -l` the file paths and function names the plan touches (use `git grep`; plain `grep` is denied by some project hooks). Read **in full** every spec that matches, plus the branch's own spec and any spec the brief names as the one being reversed. Skim only the title and "Out of scope" section of the rest. Name the skipped specs in the report. (Reading 22 full specs for a six-change plan cost 140k tokens and found nothing outside the matching four; a brief that named the one spec to read in full ran at 95k. A 28-spec project ran at 165k; that is when a project should seed its register.)
+   - **Seed mode** — the brief says `--seed-register`. Read every spec once, write `docs/behaviour-register.md` from the template shape (`id | surface | rule | set by | pinned by`), one row per user-observable rule, `pinned by: none` when you cannot name the test, and stop after step 5's report says how many rows were written. No plan is analysed in this mode.
 
 ---
 
@@ -72,6 +74,14 @@ Prior specs are one source of truth; the code is the other. For every filter, ga
 3. For any claim the plan makes about a third-party library (what it drops, logs, retries, or turns a record into), open the installed source and cite the line, or mark the claim **UNVERIFIED** in the report. An unverified claim is a conflict until resolved.
 
 Code conflicts are reported in the same table as spec conflicts. A plan that agrees with every spec and disagrees with the code is not CLEAR.
+
+## Step 3c — Trace Output-Bound Fields to Their Render Sites
+
+For every field, flag or value the plan adds so that it *reaches an output surface* (a message line, a payload field, a notification), `git grep` the functions that render that surface and check which object actually reaches them. A plan once set a flag on an in-memory result object while every message was re-projected from the database row before formatting; the flag never reached the user and six tests passed against the discarded object. Report the render call sites and the object they consume next to the plan's assignment site; a mismatch is a **CODE CONFLICT**.
+
+## Step 3d — Register Additions
+
+Whether or not a register exists, list every user-observable rule the plan introduces or changes as a proposed register row (`surface | rule | set by: <branch spec> | pinned by: <planned test or none>`). In register mode a changed rule names the existing row id it supersedes. This section is what `/dev-kit:ship` appends to the register before the PR is opened.
 
 ## Step 4 — Deep Dive on CONFLICT and NARROWING
 
@@ -150,7 +160,15 @@ Analyzed N behavioral changes in the plan.
 ## Acknowledged Changes
 
 - Task N: <brief description> — plan explicitly notes change from <spec>
+
+## Register additions
+
+| surface | rule | set by | pinned by | supersedes |
+|---|---|---|---|---|
+| message | <one sentence with the literal strings or predicate> | <branch spec path> | <test or none> | BR-n or — |
 ```
+
+In register mode the header carries `**Record**: register (N rows, M touched)`; in spec-corpus mode it carries the specs-read line above. In seed mode the report is one paragraph: rows written, rows without a pinning test, and specs that yielded no rule.
 
 ---
 
@@ -184,7 +202,8 @@ Resolve conflicts before proceeding. Options:
 
 ## Anti-Patterns
 
-- **Don't read only the current spec.** The whole point is cross-referencing against ALL prior specs. If you skip specs, you'll miss conflicts.
+- **Don't read only the current spec.** The whole point is cross-referencing against the established record. In register mode that record is the register plus the specs its touched rows cite; in spec-corpus mode it is every matching spec. Skipping either misses conflicts.
+- **Don't read the whole spec corpus when a register exists.** The register is the index; reading 28 specs on top of it is the cost the register was introduced to remove.
 - **Don't flag purely additive changes as conflicts.** Adding a new entry to an allowlist is SAFE. Replacing a general handler with a specific one is a NARROWING.
 - **Don't be vague.** Every conflict must cite the specific spec, the specific plan step, and the specific inputs affected.
 - **Don't approve ambiguous changes.** If the behavioral delta is unclear, classify as CONFLICT and ask for clarification — don't default to SAFE.

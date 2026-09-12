@@ -20,7 +20,7 @@ Arguments: `[--full|--fix|--light] [--reviewed] [PR title override]` — e.g. `/
 
 All launched reviewer agents run with `model: "opus"` passed on the Agent call, regardless of tier. They are the only Opus dispatches ship makes.
 
-Every reviewer brief is under 150 words and carries the input contract: the PR number; "read `gh pr diff` once; read full files only for the functions the diff touches; do not re-read specs; findings only, no restatement; report under 400 words; end with one line naming what you did not read". Do not paste the spec, plan, test plan or impact report into the brief; name the plan path only.
+Every reviewer brief is under 150 words and carries the input contract: the PR number; "read `gh pr diff` once; read full files only for the functions the diff touches; do not re-read specs; findings only, no restatement; report under 400 words; end with one line naming what you did not read"; and "the PR body's Rulings section and the plan's Rulings section are decided, not findings". Do not paste the spec, plan, test plan or impact report into the brief; name the plan path only.
 
 ## Steps
 
@@ -122,6 +122,10 @@ Wait for the user's response before continuing. Do NOT proceed to push or PR cre
 
 Wait for the user's response before continuing.
 
+### 7.5. Behaviour register
+
+If the project keeps `docs/behaviour-register.md` and `.dev/BEHAVIORAL_IMPACT_<branch>.md` has a non-empty "Register additions" section, append those rows to the register (new `BR-<n>` ids; a superseded row is edited in place with the new spec and this PR number) and commit them as `docs: behaviour register (<item id>)`. This is a docs-only commit, staged by path; it runs before the push so the register ships with the behaviour it describes. Skip silently when the project has no register.
+
 ### 8. Push
 
 ```bash
@@ -144,6 +148,9 @@ Body template:
 ## Summary
 <1-3 bullet points summarizing ALL commits on this branch>
 
+## Rulings
+<one line per reviewer finding that was deferred or rejected by an earlier stage (the whole-branch review, review-tests, check-impact), with where it is recorded (PRD follow-up, spec section). Omit the section when there are none.>
+
 ## Test plan
 - [ ] All tests pass
 - [ ] Integration tests cover the change
@@ -152,6 +159,8 @@ Body template:
 - [ ] Tests written before implementation
 - [ ] RED → GREEN → REFACTOR cycle followed
 ```
+
+The Rulings section exists so the PR reviewers do not re-derive a concern that was already ruled on: three Opus reviewers once re-raised, as HIGH and MEDIUM, a budget concern the whole-branch review had already deferred to a recorded follow-up. Reviewer briefs name the section as decided.
 
 An inline heredoc body is denied by the same hooks whenever the summary names a guarded function (a PR body that mentioned the Stelorder product-creation call was blocked twice). No attribution footer or trailer unless the project's owner asked for one; check the project's auto-memory.
 
