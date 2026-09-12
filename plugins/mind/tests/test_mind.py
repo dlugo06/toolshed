@@ -1774,3 +1774,89 @@ def test_cmd_propose_note_appears_after_branch_is_merged(repo, tmp_path, monkeyp
     assert mind.sync(cfg) is None
     out = mind.cmd_ask(cfg, ["assert", "concrete"], False, None, False, tmp_path)
     assert "PRIN-TEST-001 | Tests must assert concrete values" in out
+
+
+def _capture(env, payload, cwd):
+    return subprocess.run(["sh", str(PLUGIN / "scripts" / "capture.sh")], env=env, input=json.dumps(payload),
+                          capture_output=True, text=True, cwd=cwd)
+
+
+def test_capture_writes_one_json_line(repo, tmp_path):
+    cfg, _, _ = repo
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    proc = _capture(env, {"session_id": "s1", "prompt": "never use em dashes in output", "cwd": str(tmp_path)}, tmp_path)
+    assert proc.returncode == 0 and proc.stdout == ""
+    lines = (cfg.home.parent / "pending.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["session"] == "s1" and row["prompt"] == "never use em dashes in output"
+    assert row["project"] == tmp_path.name.lower() and row["cwd"] == str(tmp_path)
+    assert row["ts"].endswith("Z") and len(row["ts"]) == 20
+
+
+def test_capture_skips_slash_and_short_and_is_inert_without_repo(repo, tmp_path):
+    cfg, _, _ = repo
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    _capture(env, {"session_id": "s", "prompt": "/mind:ask threads", "cwd": str(tmp_path)}, tmp_path)
+    _capture(env, {"session_id": "s", "prompt": "ok thanks", "cwd": str(tmp_path)}, tmp_path)
+    assert not (cfg.home.parent / "pending.jsonl").exists()
+    env2 = {k: v for k, v in env.items() if k != "MIND_REPO"}
+    proc = _capture(env2, {"session_id": "s", "prompt": "a long enough prompt here", "cwd": str(tmp_path)}, tmp_path)
+    assert proc.returncode == 0 and not (cfg.home.parent / "pending.jsonl").exists()
+
+
+def test_capture_caps_file_at_two_megabytes(repo, tmp_path):
+    cfg, _, _ = repo
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.write_text(("{\"ts\": \"2026-01-01T00:00:00Z\", \"prompt\": \"" + "x" * 1000 + "\"}\n") * 2200)
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    _capture(env, {"session_id": "s", "prompt": "the newest prompt of them all", "cwd": str(tmp_path)}, tmp_path)
+    lines = pending.read_text().splitlines()
+    assert 1100 <= len(lines) <= 1102
+    assert json.loads(lines[-1])["prompt"] == "the newest prompt of them all"
+
+
+def test_read_and_mark_pending(repo):
+    cfg, _, _ = repo
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.write_text('{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n{"ts": "2026-09-12T11:00:00Z", "prompt": "two"}\n')
+    assert [r["prompt"] for r in mind.read_pending(cfg, None, 200)] == ["one", "two"]
+    mind.mark_pending(cfg, "2026-09-12T10:00:00Z")
+    assert (cfg.home.parent / "pending.jsonl.processed").read_text() == "2026-09-12T10:00:00Z\n"
+    assert [r["prompt"] for r in mind.read_pending(cfg, None, 200)] == ["two"]
+    assert mind.read_pending(cfg, "2026-09-12T11:00:00Z", 200) == []
+
+
+def test_capture_ignores_malformed_json_stdin(repo, tmp_path):
+    """A malformed hook payload must never crash the hook or raise past
+    main's try/except; it is simply dropped."""
+    cfg, _, _ = repo
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    proc = subprocess.run(["sh", str(PLUGIN / "scripts" / "capture.sh")], env=env, input="not valid json{",
+                          capture_output=True, text=True, cwd=tmp_path)
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert not (cfg.home.parent / "pending.jsonl").exists()
+
+
+def test_capture_defaults_cwd_when_payload_omits_it(repo, tmp_path):
+    """A payload with no "cwd" key must fall back to the subprocess's own
+    cwd, never the literal string "None"."""
+    cfg, _, _ = repo
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    _capture(env, {"session_id": "s1", "prompt": "never use em dashes ever again please"}, tmp_path)
+    row = json.loads((cfg.home.parent / "pending.jsonl").read_text().splitlines()[0])
+    assert row["cwd"] == str(tmp_path)
+
+
+def test_capture_preserves_non_ascii_and_emoji_unescaped(repo, tmp_path):
+    """The written line must carry literal UTF-8 bytes (ensure_ascii=False),
+    not \\uXXXX escapes, and round-trip exactly through json.loads."""
+    cfg, _, _ = repo
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    prompt = "siempre usa é acentos y emoji 😀 en las notas"
+    _capture(env, {"session_id": "s1", "prompt": prompt, "cwd": str(tmp_path)}, tmp_path)
+    line = (cfg.home.parent / "pending.jsonl").read_text().splitlines()[0]
+    assert "é" in line and "😀" in line
+    assert "\\u" not in line
+    assert json.loads(line)["prompt"] == prompt

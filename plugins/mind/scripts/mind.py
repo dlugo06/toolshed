@@ -854,6 +854,59 @@ def cmd_proposals(cfg: Config) -> list[tuple[str, str]]:
     return [(b, urls.get(b, "")) for b in branches] + [(b, "(unpushed)") for b in unpushed]
 
 
+PENDING_CAP = 2 * 1024 * 1024
+
+
+def PENDING_FILE(cfg: Config) -> Path:
+    return Path(cfg.env["MIND_PENDING"]) if cfg.env.get("MIND_PENDING") else cfg.home.parent / "pending.jsonl"
+
+
+def _utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def cmd_capture(cfg: Config, payload: dict, cwd: Path) -> None:
+    prompt = str(payload.get("prompt") or "").strip()
+    if len(prompt) < 12 or prompt.startswith("/"):
+        return
+    path = PENDING_FILE(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > PENDING_CAP:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        path.write_text("".join(lines[len(lines) // 2:]), encoding="utf-8")
+    cwd_str = str(payload.get("cwd") or cwd)
+    row = {"ts": _utc_now(), "session": str(payload.get("session_id") or ""),
+           "project": resolve_candidate(cfg, Path(cwd_str)), "cwd": cwd_str, "prompt": prompt}
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _watermark_file(cfg: Config) -> Path:
+    return PENDING_FILE(cfg).with_name(PENDING_FILE(cfg).name + ".processed")
+
+
+def read_pending(cfg: Config, since: str | None, limit: int) -> list[dict]:
+    path = PENDING_FILE(cfg)
+    if not path.exists():
+        return []
+    if since is None and _watermark_file(cfg).exists():
+        since = _watermark_file(cfg).read_text(encoding="utf-8").strip() or None
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if since and row.get("ts", "") <= since:
+            continue
+        rows.append(row)
+    return rows[:limit]
+
+
+def mark_pending(cfg: Config, ts: str) -> None:
+    _watermark_file(cfg).write_text(ts + "\n", encoding="utf-8")
+
+
 def _scoped_notes(cfg: Config, all_projects: bool, project: str | None, cwd: Path) -> list[tuple[str, Note]]:
     rows = [("", n) for n in load_notes(global_notes_dir(cfg))]
     if all_projects:
@@ -1044,6 +1097,11 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--project")
     pr.add_argument("--body")
     sub.add_parser("proposals")
+    sub.add_parser("capture")
+    pe = sub.add_parser("pending")
+    pe.add_argument("--since")
+    pe.add_argument("--limit", type=int, default=200)
+    pe.add_argument("--mark")
     return p
 
 
@@ -1075,6 +1133,17 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
             print(_redact(f"mind: inject failed, {type(exc).__name__}: {exc}", cfg))
             return 0
         print(msg)
+        return 0
+    if args.cmd == "capture":
+        # Passive capture must never fail the hook or print anything: any
+        # problem (no MIND_REPO, malformed hook JSON, a write error) is
+        # silently swallowed, same contract as the shell wrapper around it.
+        try:
+            cfg = Config.from_env(env, cwd)
+            payload = json.load(sys.stdin)
+            cmd_capture(cfg, payload, cwd)
+        except Exception:
+            pass
         return 0
     try:
         cfg = Config.from_env(env, cwd)
@@ -1111,6 +1180,15 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
         elif args.cmd == "proposals":
             rows = cmd_proposals(cfg)
             msg = "\n".join(f"{b} {u}" for b, u in rows) if rows else "mind: no open proposals"
+        elif args.cmd == "pending":
+            if args.mark:
+                mark_pending(cfg, args.mark)
+                msg = f"mind: pending marked at {args.mark}"
+            else:
+                rows = read_pending(cfg, args.since, args.limit)
+                for row in rows:
+                    print(json.dumps(row, ensure_ascii=False))
+                return 0
     except ValidationError as exc:
         print(f"mind: {exc}", file=sys.stderr)
         return 1
