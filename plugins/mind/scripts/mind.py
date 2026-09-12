@@ -230,6 +230,19 @@ def _pull_failure_message(cfg: Config, proc: subprocess.CompletedProcess | None)
     return f"mind: sync blocked: {last}"
 
 
+_CREDENTIAL_URL_RE = re.compile(r"://[^@/]+@")
+
+
+def _redact(text: str, cfg: Config | None = None) -> str:
+    """Strip a userinfo-embedded credential (https://x-access-token:TOK@...,
+    a natural alternative to MIND_TOKEN) from any git stderr or exception
+    text before it reaches stdout, plus the literal token value if known."""
+    text = _CREDENTIAL_URL_RE.sub("://***@", text)
+    if cfg and cfg.token:
+        text = text.replace(cfg.token, "***")
+    return text
+
+
 def _is_valid_git_dir(cfg: Config) -> bool:
     """True for a structurally sound repo, even one with no commits yet (a
     freshly cloned brand-new empty data repo)."""
@@ -256,7 +269,8 @@ def ensure_checkout(cfg: Config) -> str | None:
         if (cfg.home / ".git").exists():
             shutil.rmtree(cfg.home, ignore_errors=True)
         stderr = proc.stderr.strip()
-        return ("mind: clone failed, " + stderr.splitlines()[-1]) if stderr else "mind: clone failed"
+        msg = ("mind: clone failed, " + stderr.splitlines()[-1]) if stderr else "mind: clone failed"
+        return _redact(msg, cfg)
     return None
 
 
@@ -809,6 +823,7 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
         # The hook redirects only stderr to /dev/null and always exits 0:
         # any message meant to reach the owner (a bad MIND_REPO, a crash)
         # must go to stdout, or it is silently swallowed.
+        cfg = None
         try:
             cfg = Config.from_env(env, cwd)
             msg = ensure_checkout(cfg) or cmd_inject(cfg, args.event, cwd)
@@ -816,7 +831,9 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
             print(f"mind: {exc}")
             return 0
         except Exception as exc:
-            print(f"mind: inject failed, {exc}")
+            # A bare KeyError, UnicodeDecodeError on one bad note, etc: name
+            # the type so an unactionable "{}" isn't all the owner ever sees.
+            print(_redact(f"mind: inject failed, {type(exc).__name__}: {exc}", cfg))
             return 0
         print(msg)
         return 0

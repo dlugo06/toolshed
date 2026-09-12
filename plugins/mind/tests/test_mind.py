@@ -1286,7 +1286,40 @@ def test_main_inject_never_fails_the_hook(repo, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(mind, "cmd_inject", lambda c, e, w: (_ for _ in ()).throw(RuntimeError("boom")))
     env = {"MIND_REPO": cfg.repo, "MIND_HOME": str(cfg.home)}
     assert mind.main(["inject", "--event", "startup"], env=env, cwd=tmp_path) == 0
-    assert capsys.readouterr().out == "mind: inject failed, boom\n"
+    assert capsys.readouterr().out == "mind: inject failed, RuntimeError: boom\n"
+
+
+def test_main_inject_redacts_credential_url_from_exception_text(repo, tmp_path, monkeypatch, capsys):
+    """A KeyError, UnicodeDecodeError, or any other exception text must not
+    leak a token embedded in MIND_REPO (https://x-access-token:TOK@...)."""
+    cfg, _, _ = repo
+    monkeypatch.setattr(
+        mind, "cmd_inject",
+        lambda c, e, w: (_ for _ in ()).throw(RuntimeError("https://x-access-token:sekrit@github.com/o/r.git failed")),
+    )
+    env = {"MIND_REPO": cfg.repo, "MIND_HOME": str(cfg.home)}
+    assert mind.main(["inject", "--event", "startup"], env=env, cwd=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "sekrit" not in out
+    assert "https://***@github.com/o/r.git" in out
+
+
+def test_ensure_checkout_redacts_credential_url_from_clone_failure(tmp_path, monkeypatch):
+    """A clone failure's stderr can echo the repo URL back; an https URL
+    with an embedded token must never reach the owner unredacted."""
+    home = tmp_path / "h"
+    cfg = mind.Config.from_env(
+        {"MIND_REPO": "https://x-access-token:sekrit@example.com/o/r.git", "MIND_HOME": str(home)}, tmp_path)
+
+    def fake_git(c, args, cwd, timeout):
+        return subprocess.CompletedProcess(
+            args=args, returncode=128, stdout="",
+            stderr="fatal: could not clone https://x-access-token:sekrit@example.com/o/r.git\n")
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    msg = mind.ensure_checkout(cfg)
+    assert "sekrit" not in msg
+    assert "https://***@example.com/o/r.git" in msg
 
 
 def test_hook_end_to_end(repo, tmp_path):
