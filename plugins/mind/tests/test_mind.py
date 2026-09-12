@@ -1324,6 +1324,7 @@ def test_cmd_inject_prints_sections_in_order(repo, tmp_path, monkeypatch):
     out = mind.cmd_inject(cfg, "startup", work)
     assert out == (
         mind.PROTOCOL.format(home=cfg.home)
+        + "\nMode: apply notes silently and cite. Conflicts: use precedence notes.\n"
         + "\n# Global\n\n## review\n- PREF-REV-001 | Global rule | should\n"
         + "\n# proj-a\n\n## review\n- PREF-REV-001 | Project rule | should\n"
         + "\n# Projects\n\n- proj-a | proj-a |  | Describe the project: purpose, kind of work, repo URL.\n"
@@ -1384,6 +1385,7 @@ def test_cmd_inject_compact_makes_no_network_call(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
     monkeypatch.setattr(mind, "pull", lambda c: pytest.fail("pull called on compact"))
+    monkeypatch.setattr(mind, "cmd_proposals", lambda c: pytest.fail("cmd_proposals called on compact"))
     out = mind.cmd_inject(cfg, "compact", tmp_path)
     assert out.startswith(mind.PROTOCOL.format(home=cfg.home))
 
@@ -1961,3 +1963,45 @@ def test_lint_malformed_rows_are_global_then_project_order(repo, tmp_path):
         "malformed: global/notes/PREF-REV-007-w.md: stage must be one of: identity, product, planning, development, testing, review, release, deployment, monitoring, security",
         "malformed: projects/zzz/notes/PREF-REV-008-x.md: stage must be one of: identity, product, planning, development, testing, review, release, deployment, monitoring, security",
     ]
+
+
+def test_settings_defaults_and_set(repo):
+    cfg, _, _ = repo
+    assert mind.load_settings(cfg) == {"auto_answer": True, "escalate": False}
+    assert mind.cmd_settings(cfg, ["escalate=true"]) == "mind: settings auto_answer=true escalate=true"
+    assert json.loads((cfg.home.parent / "settings.json").read_text()) == {"auto_answer": True, "escalate": True}
+    with pytest.raises(mind.ValidationError, match="unknown setting: foo"):
+        mind.cmd_settings(cfg, ["foo=1"])
+    (cfg.home.parent / "settings.json").write_text('{"auto_answer": "false", "escalate": 3}')
+    assert mind.load_settings(cfg) == {"auto_answer": False, "escalate": False}   # string false is false; junk keeps the default
+
+
+def test_load_settings_corrupt_json_returns_defaults(repo):
+    cfg, _, _ = repo
+    (cfg.home.parent / "settings.json").write_text("{not json")
+    assert mind.load_settings(cfg) == {"auto_answer": True, "escalate": False}
+
+
+def test_inject_mode_proposals_and_pending_lines(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "cmd_proposals", lambda c: [("propose/2026-09-12-x", "https://example.test/pr/9")])
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.write_text("".join(f'{{"ts": "2026-09-12T10:00:{i:02d}Z", "prompt": "p{i}"}}\n' for i in range(25)))
+    mind.mark_pending(cfg, "2026-09-12T10:00:04Z")
+    out = mind.cmd_inject(cfg, "startup", tmp_path)
+    assert "\nMode: apply notes silently and cite. Conflicts: use precedence notes.\n" in out
+    assert out.endswith("\n1 open proposal: propose/2026-09-12-x https://example.test/pr/9\n"
+                        "\n20 pending prompts since 2026-09-12: run /mind:digest\n")
+    mind.cmd_settings(cfg, ["auto_answer=false", "escalate=true"])
+    out2 = mind.cmd_inject(cfg, "compact", tmp_path)
+    assert "\nMode: confirm before applying a note. Conflicts: always ask.\n" in out2
+    assert "1 open proposal: propose/2026-09-12-x https://example.test/pr/9" in out2   # served from the cache on compact
+
+
+def test_inject_compact_without_proposals_cache_makes_no_call_and_prints_nothing(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "cmd_proposals", lambda c: pytest.fail("cmd_proposals called on compact"))
+    out = mind.cmd_inject(cfg, "compact", tmp_path)
+    assert "open proposal" not in out

@@ -1100,8 +1100,59 @@ PROTOCOL = (
     "global, facts about this repo go to the project. When this project is silent, look "
     "in related projects' notes. If two notes conflict, surface both IDs and ask. The "
     "project's own `CLAUDE.md` wins over any note. Save memories through "
-    "`/mind:remember`, not the auto-memory directory.\n"
+    "`/mind:remember`, not the auto-memory directory. Anything you inferred rather than "
+    "the owner stated goes through `propose`, never `add`. Check precedence notes before "
+    "surfacing a conflict.\n"
 )
+
+DEFAULT_SETTINGS = {"auto_answer": True, "escalate": False}
+
+
+def SETTINGS_FILE(cfg: Config) -> Path:
+    return Path(cfg.env["MIND_SETTINGS"]) if cfg.env.get("MIND_SETTINGS") else cfg.home.parent / "settings.json"
+
+
+def load_settings(cfg: Config) -> dict:
+    out = dict(DEFAULT_SETTINGS)
+    p = SETTINGS_FILE(cfg)
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            for k, v in data.items():
+                if k not in DEFAULT_SETTINGS:
+                    continue
+                if isinstance(v, bool):
+                    out[k] = v
+                elif isinstance(v, str):
+                    out[k] = v.strip().lower() in ("1", "true", "yes", "on")
+                # any other JSON type keeps the default
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    return out
+
+
+def cmd_settings(cfg: Config, sets: list[str]) -> str:
+    current = load_settings(cfg)
+    for item in sets:
+        key, _, val = item.partition("=")
+        if key not in DEFAULT_SETTINGS:
+            raise ValidationError(f"unknown setting: {key}")
+        current[key] = val.strip().lower() in ("1", "true", "yes", "on")
+    if sets:
+        SETTINGS_FILE(cfg).parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS_FILE(cfg).write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
+    return "mind: settings " + " ".join(f"{k}={str(v).lower()}" for k, v in current.items())
+
+
+def _mode_line(cfg: Config) -> str:
+    s = load_settings(cfg)
+    mode = "apply notes silently and cite" if s["auto_answer"] else "confirm before applying a note"
+    conflicts = "always ask" if s["escalate"] else "use precedence notes"
+    return f"Mode: {mode}. Conflicts: {conflicts}.\n"
+
+
+def _proposals_cache(cfg: Config) -> Path:
+    return PENDING_FILE(cfg).with_name(PENDING_FILE(cfg).name + ".proposals")
 
 
 def _truncate_notes(notes: list[Note], heading: str, keep: int) -> str:
@@ -1171,6 +1222,7 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
             # on disk until it is regenerated locally.
             reindex(cfg)
     out.append(PROTOCOL.format(home=cfg.home))
+    out.append("\n" + _mode_line(cfg))
     candidate = resolve_candidate(cfg, cwd)
     slug = match_project(cfg, candidate)
     global_notes = load_notes(global_notes_dir(cfg))
@@ -1194,6 +1246,29 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
     malformed = _malformed_count(cfg)
     if malformed:
         out.append(f"\n{malformed} malformed notes skipped, see {cfg.home}\n")
+    cache = _proposals_cache(cfg)
+    if event in ("startup", "resume"):
+        rows = cmd_proposals(cfg)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(rows), encoding="utf-8")
+    else:
+        rows = []
+        if cache.exists():
+            try:
+                rows = [tuple(r) for r in json.loads(cache.read_text(encoding="utf-8"))]
+            except json.JSONDecodeError:
+                rows = []
+    if rows:
+        n = len(rows)
+        noun = "proposal" if n == 1 else "proposals"
+        first_b, first_u = rows[0]
+        out.append(f"\n{n} open {noun}: {first_b} {first_u}\n")
+        out.extend(f"{b} {u}\n" for b, u in rows[1:])
+    pending = read_pending(cfg, None, 10**6)
+    if len(pending) >= 20:
+        wm_path = _watermark_file(cfg)
+        date = wm_path.read_text(encoding="utf-8").strip()[:10] if wm_path.exists() else "the beginning"
+        out.append(f"\n{len(pending)} pending prompts since {date}: run /mind:digest\n")
     return "".join(out)
 
 
@@ -1237,6 +1312,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("retire").add_argument("note_id")
     li = sub.add_parser("lint")
     li.add_argument("--days", type=int, default=180)
+    se = sub.add_parser("settings")
+    se.add_argument("--set", dest="sets", action="append", default=[])
     return p
 
 
@@ -1332,6 +1409,8 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
             msg = cmd_retire(cfg, args.note_id)
         elif args.cmd == "lint":
             msg = cmd_lint(cfg, args.days)
+        elif args.cmd == "settings":
+            msg = cmd_settings(cfg, args.sets)
     except ValidationError as exc:
         print(f"mind: {exc}", file=sys.stderr)
         return 1
