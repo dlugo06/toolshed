@@ -1000,6 +1000,39 @@ def test_cmd_inject_reindexes_after_pull_on_fresh_clone(repo, tmp_path):
     assert "- PREF-REV-001 | Global rule | should" in out
 
 
+def test_cmd_inject_builds_projects_index_when_pull_fails_on_fresh_clone(repo, tmp_path, monkeypatch):
+    """A fresh clone whose startup pull then fails offline must still show
+    real projects, not silently claim there are zero of them."""
+    cfg_a, bare, _ = repo
+    mind.cmd_init(cfg_a)
+    work = tmp_path / "acme-api"
+    work.mkdir()
+    _add(cfg_a, tmp_path, "Some rule", "b", scope="project", cwd=work)
+    home_b = tmp_path / "home_b"
+    cfg_b = dataclasses.replace(cfg_a, home=home_b)
+    assert mind.ensure_checkout(cfg_b) is None
+    assert not (cfg_b.home / "projects" / "index.md").is_file()
+    monkeypatch.setattr(mind, "sync", lambda c: "mind: offline, using cached copy from 2026-09-12")
+    out = mind.cmd_inject(cfg_b, "startup", tmp_path)
+    assert "- acme-api | acme-api |" in out
+
+
+def test_cmd_inject_builds_projects_index_on_compact_when_missing(repo, tmp_path):
+    """clear/compact never sync or reindex: a fresh clone injected first
+    on one of those events must still get a real projects index."""
+    cfg_a, bare, _ = repo
+    mind.cmd_init(cfg_a)
+    work = tmp_path / "acme-api"
+    work.mkdir()
+    _add(cfg_a, tmp_path, "Some rule", "b", scope="project", cwd=work)
+    home_b = tmp_path / "home_b"
+    cfg_b = dataclasses.replace(cfg_a, home=home_b)
+    assert mind.ensure_checkout(cfg_b) is None
+    assert not (cfg_b.home / "projects" / "index.md").is_file()
+    out = mind.cmd_inject(cfg_b, "compact", tmp_path)
+    assert "- acme-api | acme-api |" in out
+
+
 def test_cmd_add_two_checkouts_race_through_cmd_add(repo, tmp_path, monkeypatch):
     """Two independent checkouts (not a raw seeded push) both race cmd_add for
     the same next ID. Neither collides at write time (each pulled before the

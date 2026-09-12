@@ -778,7 +778,15 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
     global_notes = load_notes(global_notes_dir(cfg))
     project_notes = load_notes(project_notes_dir(cfg, slug)) if slug else None
     project_heading = slug if slug else f"no notes for {candidate} yet\n"
-    projects_idx = (cfg.home / "projects" / "index.md").read_text() if (cfg.home / "projects" / "index.md").is_file() else "# Projects\n"
+    projects_index_path = cfg.home / "projects" / "index.md"
+    if not projects_index_path.is_file():
+        # Indexes are gitignored: a fresh clone, a clear/compact (which never
+        # sync/reindex above), or a failed pull can all leave this file
+        # missing. Reading it missing as "# Projects\n" would silently tell
+        # the owner they have zero projects, a wrong answer rather than an
+        # error.
+        reindex(cfg)
+    projects_idx = projects_index_path.read_text() if projects_index_path.is_file() else "# Projects\n"
     global_idx, project_idx = _fit(global_notes, "Global", project_notes, project_heading, projects_idx)
     out += ["\n" + global_idx, "\n" + project_idx, "\n" + projects_idx]
     drafts = _draft_count(cfg)
