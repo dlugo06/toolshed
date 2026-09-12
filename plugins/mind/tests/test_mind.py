@@ -182,6 +182,20 @@ def test_load_notes_and_first_paragraph(tmp_path):
     assert notes[0].strength == "must"
 
 
+def test_load_notes_skips_malformed_frontmatter_and_bad_id(tmp_path):
+    """A hand-edited or hand-migrated note whose frontmatter fails
+    validate_meta (off-enum stage, most often) or whose id doesn't match
+    the ID shape must never render as a blank `- |  | ` index row."""
+    (tmp_path / "PREF-REV-001-ok.md").write_text(mind.render_frontmatter(
+        {"id": "PREF-REV-001", "title": "OK", "type": "preference", "stage": "review", "strength": "must"}, "b\n"))
+    (tmp_path / "PREF-REV-002-badstage.md").write_text(mind.render_frontmatter(
+        {"id": "PREF-REV-002", "title": "Bad", "type": "preference", "stage": "wishful", "strength": "must"}, "b\n"))
+    (tmp_path / "bad-id.md").write_text(mind.render_frontmatter(
+        {"id": "not-an-id", "title": "Bad id", "type": "preference", "stage": "review", "strength": "must"}, "b\n"))
+    notes = mind.load_notes(tmp_path)
+    assert [n.id for n in notes] == ["PREF-REV-001"]
+
+
 def _git(args, cwd):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
 
@@ -1238,6 +1252,21 @@ def test_cmd_inject_plural_draft_count_wording(repo, tmp_path):
     _add(cfg, tmp_path, "Draft two", "d", status="draft")
     out = mind.cmd_inject(cfg, "startup", tmp_path)
     assert "\n2 drafts await acceptance: run /mind:ask --drafts\n" in out
+
+
+def test_cmd_inject_reports_malformed_note_count_and_hides_off_enum_stage(repo, tmp_path):
+    """An off-enum stage note must disappear from the index (not render
+    blank) and be counted, not silently dropped with no trace at all."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Good rule", "g")
+    bad_path = mind.global_notes_dir(cfg) / "PREF-REV-999-hand-edited.md"
+    bad_path.write_text(mind.render_frontmatter(
+        {"id": "PREF-REV-999", "title": "Hand edited", "type": "preference", "stage": "not-a-stage",
+         "strength": "must", "status": "accepted"}, "b\n"))
+    out = mind.cmd_inject(cfg, "clear", tmp_path)
+    assert "PREF-REV-999" not in out
+    assert f"1 malformed notes skipped, see {cfg.home}\n" in out
 
 
 def test_cmd_inject_without_project(repo, tmp_path):

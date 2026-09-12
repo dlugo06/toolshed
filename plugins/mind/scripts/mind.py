@@ -108,14 +108,39 @@ class Note:
         return self.body.strip().split("\n\n", 1)[0].strip()
 
 
+_NOTE_ID_RE = re.compile(r"^[A-Z]+-[A-Z]+-\d{3}$")
+
+
+def _is_well_formed(meta: dict) -> bool:
+    return not validate_meta(meta) and bool(_NOTE_ID_RE.fullmatch(meta.get("id") or ""))
+
+
 def load_notes(notes_dir: Path) -> list[Note]:
+    """Only well-formed notes: a file whose frontmatter fails validate_meta
+    (an off-enum stage from a hand edit, most often) or whose id doesn't
+    match the ID shape must never render as a blank index row, or count
+    toward `must` priority for a stage that then never shows it."""
     notes = []
     if not notes_dir.is_dir():
         return notes
     for path in sorted(notes_dir.glob("*.md")):
         meta, body = parse_frontmatter(path.read_text())
-        notes.append(Note(path, meta, body))
+        if _is_well_formed(meta):
+            notes.append(Note(path, meta, body))
     return notes
+
+
+def _malformed_count(cfg: Config) -> int:
+    dirs = [global_notes_dir(cfg)] + [project_notes_dir(cfg, s) for s in list_projects(cfg)]
+    count = 0
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for path in d.glob("*.md"):
+            meta, _ = parse_frontmatter(path.read_text())
+            if not _is_well_formed(meta):
+                count += 1
+    return count
 
 
 GIT_TIMEOUTS = {"clone": 30, "pull": 10, "push": 20}
@@ -811,6 +836,9 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
     if drafts:
         noun, verb = ("draft", "awaits") if drafts == 1 else ("drafts", "await")
         out.append(f"\n{drafts} {noun} {verb} acceptance: run /mind:ask --drafts\n")
+    malformed = _malformed_count(cfg)
+    if malformed:
+        out.append(f"\n{malformed} malformed notes skipped, see {cfg.home}\n")
     return "".join(out)
 
 
