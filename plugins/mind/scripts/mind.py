@@ -12,6 +12,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 USAGE = "usage: mind.py {inject,add,propose,proposals,ask,pending,stale,affirm,retire,lint,settings,doctor,reindex,accept,sync,init} ..."
@@ -1047,6 +1048,85 @@ def cmd_lint(cfg: Config, days: int) -> str:
     return "".join(r + "\n" for r in rows) + tail
 
 
+def _checkout_state(cfg: Config) -> str:
+    """Read-only classification of cfg.home's checkout: never calls
+    ensure_checkout (which clones or mutates). Mirrors its branches with no
+    side effects, for `doctor`, which must be safe to run against a home
+    that was never cloned."""
+    if not (cfg.home / ".git").is_dir():
+        return "missing"
+    if not _is_valid_git_dir(cfg):
+        return "broken (not a git dir)"
+    if not _has_head(cfg):
+        return "broken (no HEAD)"
+    return "ok"
+
+
+def _remote_reachable(cfg: Config) -> tuple[bool, int | str]:
+    """`git ls-remote` against cfg.repo directly (not the "origin" remote
+    name), so this works even when cfg.home was never cloned."""
+    t0 = time.monotonic()
+    try:
+        proc = git(cfg, ["ls-remote", "--heads", "--", cfg.repo], cfg.home.parent, 10)
+    except (subprocess.TimeoutExpired, OSError):
+        return False, "unreachable"
+    if proc.returncode == 0:
+        return True, int((time.monotonic() - t0) * 1000)
+    lines = proc.stderr.strip().splitlines()
+    return False, _redact(lines[-1] if lines else "unknown error", cfg)
+
+
+def _git_user_email(cfg: Config) -> str | None:
+    cwd = cfg.home if (cfg.home / ".git").is_dir() else None
+    try:
+        proc = subprocess.run(["git", "config", "user.email"], cwd=cwd, env=dict(cfg.env),
+                              capture_output=True, text=True, timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    value = proc.stdout.strip()
+    return value if proc.returncode == 0 and value else None
+
+
+def cmd_doctor(cfg: Config) -> str:
+    lines: list[str] = []
+    lines.append(_redact(
+        f"config: MIND_REPO={cfg.repo} MIND_HOME={cfg.home} "
+        f"MIND_TOKEN={'set' if cfg.token else 'unset'} MIND_PROJECT={cfg.project or 'unset'}", cfg))
+    state = _checkout_state(cfg)
+    lines.append(f"checkout: {state}")
+    lines.append("upstream: main tracks origin/main" if state == "ok" and _has_upstream(cfg) else "upstream: none")
+    reachable, info = _remote_reachable(cfg)
+    lines.append(f"remote: reachable ({info} ms)" if reachable else f"remote: unreachable ({_redact(str(info), cfg)})")
+    email = _git_user_email(cfg)
+    lines.append(f"identity: {email or 'none, will use mind@localhost'}")
+    version_proc = _gh(cfg, ["--version"], cfg.home)
+    if version_proc is None:
+        lines.append("gh: missing")
+    else:
+        m = re.search(r"gh version (\S+)", version_proc.stdout or "")
+        auth_proc = _gh(cfg, ["auth", "status"], cfg.home)
+        status = "authenticated" if auth_proc is not None and auth_proc.returncode == 0 else "present, not authenticated"
+        lines.append(f"gh: {m.group(1) if m else 'unknown'} {status}")
+    pending_path = PENDING_FILE(cfg)
+    total = len(pending_path.read_text(encoding="utf-8").splitlines()) if pending_path.exists() else 0
+    unprocessed = len(read_pending(cfg, None, 10**6))
+    wm_path = _watermark_file(cfg)
+    watermark = wm_path.read_text(encoding="utf-8").strip() if wm_path.exists() else "none"
+    lines.append(f"pending: {total} lines, {unprocessed} unprocessed, watermark {watermark}")
+    settings = load_settings(cfg)
+    lines.append(f"settings: auto_answer={str(settings['auto_answer']).lower()} escalate={str(settings['escalate']).lower()}")
+    accepted = draft = 0
+    for d in [global_notes_dir(cfg)] + [project_notes_dir(cfg, s) for s in list_projects(cfg)]:
+        for n in load_notes(d):
+            if n.status == "accepted":
+                accepted += 1
+            elif n.status == "draft":
+                draft += 1
+    malformed = _malformed_count(cfg)
+    lines.append(f"notes: {accepted} accepted, {draft} drafts, {malformed} malformed, {len(list_projects(cfg))} projects")
+    return "\n".join(_redact(line, cfg) for line in lines) + "\n"
+
+
 def _ask_row(prefix: str, note: "Note", drafts: bool, tag: str = "") -> str:
     line = f"{tag}{prefix}{note.id} | {note.title} | {note.meta.get('scope', 'global')} | {note.strength}"
     if drafts:
@@ -1314,6 +1394,7 @@ def build_parser() -> argparse.ArgumentParser:
     li.add_argument("--days", type=int, default=180)
     se = sub.add_parser("settings")
     se.add_argument("--set", dest="sets", action="append", default=[])
+    sub.add_parser("doctor")
     return p
 
 
@@ -1362,7 +1443,7 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
     except ConfigError as exc:
         print(f"mind: {exc}", file=sys.stderr)
         return 1
-    if args.cmd != "reindex":
+    if args.cmd not in ("reindex", "doctor"):
         clone_failed = ensure_checkout(cfg)
         if clone_failed:
             # Unlike inject (the session-start hook, which must never block
@@ -1411,6 +1492,8 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
             msg = cmd_lint(cfg, args.days)
         elif args.cmd == "settings":
             msg = cmd_settings(cfg, args.sets)
+        elif args.cmd == "doctor":
+            msg = cmd_doctor(cfg)
     except ValidationError as exc:
         print(f"mind: {exc}", file=sys.stderr)
         return 1

@@ -2005,3 +2005,42 @@ def test_inject_compact_without_proposals_cache_makes_no_call_and_prints_nothing
     monkeypatch.setattr(mind, "cmd_proposals", lambda c: pytest.fail("cmd_proposals called on compact"))
     out = mind.cmd_inject(cfg, "compact", tmp_path)
     assert "open proposal" not in out
+
+
+def test_doctor_lines(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    cfg = dataclasses.replace(cfg, repo="https://x-access-token:sekrit@example.test/o/r.git", token="sekrit")
+    monkeypatch.setattr(mind, "_gh", lambda c, a, w, timeout=20: subprocess.CompletedProcess(a, 0, "gh version 2.0.0\n", "Logged in"))
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
+    out = mind.cmd_doctor(cfg).splitlines()
+    assert out[0] == f"config: MIND_REPO=https://***@example.test/o/r.git MIND_HOME={cfg.home} MIND_TOKEN=set MIND_PROJECT=unset"
+    assert out[1] == "checkout: ok"
+    assert out[2] == "upstream: main tracks origin/main"
+    assert out[3] == "remote: reachable (12 ms)"
+    assert out[4].startswith("identity: ")
+    assert out[5] == "gh: 2.0.0 authenticated"
+    assert out[6] == "pending: 0 lines, 0 unprocessed, watermark none"
+    assert out[7] == "settings: auto_answer=true escalate=false"
+    assert out[8] == "notes: 0 accepted, 0 drafts, 0 malformed, 0 projects"
+    assert "sekrit" not in "\n".join(out)
+
+
+def test_doctor_missing_checkout_never_clones(tmp_path, monkeypatch):
+    """doctor must never call ensure_checkout (which would clone or mutate):
+    it reports `checkout: missing` for a home that was never cloned, purely
+    read-only."""
+    env = {"MIND_REPO": str(tmp_path / "missing.git"), "MIND_HOME": str(tmp_path / "home")}
+    cfg = mind.Config.from_env(env, tmp_path)
+    real_git = mind.git
+
+    def spy(cfg, args, cwd, timeout):
+        assert "clone" not in args
+        return real_git(cfg, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", spy)
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    out = mind.cmd_doctor(cfg).splitlines()
+    assert not cfg.home.exists()
+    assert out[1] == "checkout: missing"
+    assert out[8] == "notes: 0 accepted, 0 drafts, 0 malformed, 0 projects"
