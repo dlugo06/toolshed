@@ -2261,6 +2261,22 @@ def test_lint_reports_no_affirmed_date_for_null_affirmed(repo):
     assert "1000000" not in out
 
 
+def test_lint_unsuperseded_row_uses_the_old_notes_own_prefix(repo):
+    """L: a project note superseding a GLOBAL note must not mislabel the
+    global note with the project's own prefix in the unsuperseded row."""
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    _raw_note(cfg, "PREF-REV-001-old.md", id="PREF-REV-001", title="Old")
+    mind._ensure_project(cfg, "proj-a")
+    p = mind.project_notes_dir(cfg, "proj-a") / "PREF-REV-002-new.md"
+    p.write_text(mind.render_frontmatter(
+        {"id": "PREF-REV-002", "title": "New", "type": "preference", "stage": "review",
+         "scope": "project:proj-a", "strength": "should", "status": "accepted",
+         "affirmed": "2026-09-01", "supersedes": "PREF-REV-001", "source": "t"}, "body\n"))
+    out = mind.cmd_lint(cfg, 180)
+    assert "unsuperseded: PREF-REV-001 (by proj-a/PREF-REV-002)\n" in out
+    assert "unsuperseded: proj-a/PREF-REV-001" not in out
+
+
 def test_lint_reports_budget_overflow(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo; mind.cmd_init(cfg)
     monkeypatch.setattr(mind, "INDEX_BUDGET", 200)

@@ -1142,7 +1142,10 @@ def cmd_lint(cfg: Config, days: int) -> str:
         for a, b in zip(dupes, dupes[1:]):
             rows.append(f"duplicate id: {a.path.relative_to(cfg.home).as_posix()} and "
                         f"{b.path.relative_to(cfg.home).as_posix()}")
-    ids = {p + n.id: n for p, n in notes}
+    # Values carry each note's own prefix too: a project note can supersede
+    # a GLOBAL note (bare id, no prefix), and the unsuperseded row below must
+    # label that old note with its own ("") prefix, not the new note's.
+    ids: dict[str, tuple[str, Note]] = {p + n.id: (p, n) for p, n in notes}
     for p, n in notes:
         sup = n.meta.get("supersedes")
         if sup and (p + sup) not in ids and sup not in ids:
@@ -1152,9 +1155,11 @@ def cmd_lint(cfg: Config, days: int) -> str:
                 rows.append(f"dangling: {p}{n.id} refers to {ref}")
     for p, n in notes:
         sup = n.meta.get("supersedes")
-        old = ids.get(p + (sup or "")) or ids.get(sup or "")
-        if old is not None and old.status == "accepted":
-            rows.append(f"unsuperseded: {p}{old.id} (by {p}{n.id})")
+        found = ids.get(p + (sup or "")) or ids.get(sup or "")
+        if found is not None:
+            old_p, old = found
+            if old.status == "accepted":
+                rows.append(f"unsuperseded: {old_p}{old.id} (by {p}{n.id})")
     seen: dict[tuple[str, str], str] = {}
     for p, n in notes:
         if n.status != "accepted":
