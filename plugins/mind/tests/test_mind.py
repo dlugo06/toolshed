@@ -1639,6 +1639,24 @@ def test_cmd_propose_branch_commits_pr_and_returns_to_main(repo, tmp_path, monke
     assert not (cfg.home.parent / "proposal-digest-run.md").exists()   # M5: generated body file cleaned up
 
 
+def test_gh_disables_prompts_via_env(repo, monkeypatch):
+    """L: `gh auth status` can prompt for a browser on some gh versions;
+    GH_PROMPT_DISABLED=1 must be set so a `doctor` run never hangs waiting
+    for interactive input."""
+    cfg, _, _ = repo
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(mind.shutil, "which", lambda name: "/usr/bin/gh")
+    monkeypatch.setattr(mind.subprocess, "run", fake_run)
+    mind._gh(cfg, ["--version"], cfg.home)
+    assert captured["env"] is not None
+    assert captured["env"].get("GH_PROMPT_DISABLED") == "1"
+
+
 def test_cmd_propose_without_gh(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)

@@ -763,6 +763,9 @@ def _gh(cfg: Config, args: list[str], cwd: Path, timeout: float = 20) -> subproc
     if shutil.which("gh") is None:
         return None
     env = {k: v for k, v in cfg.env.items() if k != "MIND_TOKEN"}
+    # `gh auth status` (and others) can prompt for a browser on some gh
+    # versions; every call here must be non-interactive.
+    env["GH_PROMPT_DISABLED"] = "1"
     try:
         return subprocess.run(["gh", *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
     except (subprocess.TimeoutExpired, OSError):
