@@ -1774,6 +1774,47 @@ def test_cmd_propose_push_failure_keeps_branch_locally(repo, tmp_path, monkeypat
     assert _git(["branch", "--list", "propose/2026-09-12-x"], cfg.home).stdout.strip() == "propose/2026-09-12-x"
 
 
+def test_cmd_propose_push_timeout_returns_spec_message_and_removes_worktree(repo, tmp_path, monkeypatch):
+    """M2: a push that hangs must produce the spec'd committed-locally
+    message (and remove the worktree), not a raw TimeoutExpired traceback."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:1] == ["push"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert out == "mind: proposal branch propose/2026-09-12-x is committed locally; push failed"
+    assert not list(cfg.home.parent.glob("worktree-*"))
+
+
+def test_cmd_propose_fetch_timeout_proceeds_from_local_origin_main(repo, tmp_path, monkeypatch):
+    """M2: a fetch that hangs is offline, not fatal -- propose must proceed
+    from whatever origin/main the local checkout already has."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:2] == ["fetch", "-q"] and args != ["fetch", "-q", "--prune"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert out == "mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+
+
 def test_cmd_propose_retries_after_failed_push_reusing_local_branch(repo, tmp_path, monkeypatch):
     """H3: after a failed push the branch exists locally only. Proposing
     again the same day under the same topic (the digest skill's topic is

@@ -763,7 +763,12 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
     topic_slug = _slugify(topic)
     _validate_slug(topic_slug)
     branch = f"propose/{_today()}-{topic_slug}"
-    git(cfg, ["fetch", "-q", "origin"], cfg.home, GIT_TIMEOUTS["pull"])
+    try:
+        git(cfg, ["fetch", "-q", "origin"], cfg.home, GIT_TIMEOUTS["pull"])
+    except subprocess.TimeoutExpired:
+        # Offline: proceed from whatever origin/main the local checkout
+        # already has; the PR gets rebased on merge if it moved meanwhile.
+        pass
     wt = _worktree_path(cfg, branch)
     remote_has = git(cfg, ["rev-parse", "--verify", "-q", f"origin/{branch}"], cfg.home, 5).returncode == 0
     local_has = git(cfg, ["rev-parse", "--verify", "-q", f"refs/heads/{branch}"], cfg.home, 5).returncode == 0
@@ -814,7 +819,10 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
                 old.path.write_text(render_frontmatter(old.meta, old.body), encoding="utf-8")
             _require_commit(commit_all(wcfg, f"mind: propose {meta['id']} {meta['title']}"))
             rows.append((prefix, Note(path, *parse_frontmatter(path.read_text(encoding="utf-8")))))
-        push_proc = git(wcfg, ["push", "-q", "-u", "origin", branch], wt, GIT_TIMEOUTS["push"])
+        try:
+            push_proc = git(wcfg, ["push", "-q", "-u", "origin", branch], wt, GIT_TIMEOUTS["push"])
+        except subprocess.TimeoutExpired:
+            return f"mind: proposal branch {branch} is committed locally; push failed"
         if push_proc.returncode != 0:
             return f"mind: proposal branch {branch} is committed locally; push failed"
         n = len(rows)
