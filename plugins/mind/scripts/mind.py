@@ -7,6 +7,7 @@ import dataclasses
 import datetime as dt
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -229,16 +230,33 @@ def _pull_failure_message(cfg: Config, proc: subprocess.CompletedProcess | None)
     return f"mind: sync blocked: {last}"
 
 
+def _is_valid_git_dir(cfg: Config) -> bool:
+    """True for a structurally sound repo, even one with no commits yet (a
+    freshly cloned brand-new empty data repo)."""
+    return git(cfg, ["rev-parse", "--git-dir"], cfg.home, 5).returncode == 0
+
+
 def ensure_checkout(cfg: Config) -> str | None:
     if (cfg.home / ".git").is_dir():
-        return None
+        if _has_head(cfg) or _is_valid_git_dir(cfg):
+            return None
+        # A clone the 30s timeout killed mid-transfer (or any other half
+        # write) leaves exactly this: .git present, nothing usable inside.
+        # Every later run would otherwise report "offline" forever and
+        # inject an empty index that reads as "you have no notes".
+        return f"mind: checkout at {cfg.home} is broken, delete it and rerun"
     cfg.home.parent.mkdir(parents=True, exist_ok=True)
     try:
         proc = git(cfg, ["clone", "-q", "--", cfg.repo, str(cfg.home)], cfg.home.parent, GIT_TIMEOUTS["clone"])
     except subprocess.TimeoutExpired:
+        if (cfg.home / ".git").exists():
+            shutil.rmtree(cfg.home, ignore_errors=True)
         return "mind: clone failed, timed out"
     if proc.returncode != 0:
-        return "mind: clone failed, " + proc.stderr.strip().splitlines()[-1:][0] if proc.stderr.strip() else "mind: clone failed"
+        if (cfg.home / ".git").exists():
+            shutil.rmtree(cfg.home, ignore_errors=True)
+        stderr = proc.stderr.strip()
+        return ("mind: clone failed, " + stderr.splitlines()[-1]) if stderr else "mind: clone failed"
     return None
 
 

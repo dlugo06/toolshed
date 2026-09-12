@@ -490,6 +490,49 @@ def test_sync_rebase_content_conflict_returns_sync_conflict_message(repo):
     assert status == ""
 
 
+def test_ensure_checkout_reports_broken_checkout_when_git_dir_has_no_head(tmp_path):
+    """A clone the timeout killed mid-transfer (or any other half write)
+    leaves .git present with nothing usable inside. That must be reported
+    as broken, not pass as a healthy (if empty) checkout."""
+    home = tmp_path / "h"
+    (home / ".git").mkdir(parents=True)
+    cfg = mind.Config.from_env({"MIND_REPO": "irrelevant", "MIND_HOME": str(home)}, tmp_path)
+    msg = mind.ensure_checkout(cfg)
+    assert msg == f"mind: checkout at {home} is broken, delete it and rerun"
+
+
+def test_ensure_checkout_removes_partial_dir_on_clone_timeout(tmp_path, monkeypatch):
+    home = tmp_path / "h"
+    cfg = mind.Config.from_env({"MIND_REPO": "irrelevant", "MIND_HOME": str(home)}, tmp_path)
+
+    def fake_git(c, args, cwd, timeout):
+        if args and args[0] == "clone":
+            (c.home / ".git").mkdir(parents=True)  # what a killed clone leaves behind
+            raise subprocess.TimeoutExpired(cmd="git clone", timeout=timeout)
+        raise AssertionError(f"unexpected git call: {args}")
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    msg = mind.ensure_checkout(cfg)
+    assert msg == "mind: clone failed, timed out"
+    assert not home.exists()
+
+
+def test_ensure_checkout_removes_partial_dir_on_clone_failure(tmp_path, monkeypatch):
+    home = tmp_path / "h"
+    cfg = mind.Config.from_env({"MIND_REPO": "irrelevant", "MIND_HOME": str(home)}, tmp_path)
+
+    def fake_git(c, args, cwd, timeout):
+        if args and args[0] == "clone":
+            (c.home / ".git").mkdir(parents=True)
+            return subprocess.CompletedProcess(args=args, returncode=128, stdout="", stderr="fatal: boom\n")
+        raise AssertionError(f"unexpected git call: {args}")
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    msg = mind.ensure_checkout(cfg)
+    assert msg == "mind: clone failed, fatal: boom"
+    assert not home.exists()
+
+
 def test_ensure_checkout_reports_failure_for_nonempty_home_without_git(repo):
     """A crashed clone can leave a non-empty directory with no .git/: against
     a perfectly valid source, git clone still refuses to clone into a
