@@ -15,6 +15,18 @@ sys.path.insert(0, str(PLUGIN / "scripts"))
 import mind  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _isolated_git_env(monkeypatch):
+    """Keep every git call in this suite off the developer's real git config
+    and identity, whatever machine or CI runner is running the tests."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "t")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "t@example.com")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "t")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+
+
 def test_hook_is_silent_without_mind_repo(tmp_path):
     env = {k: v for k, v in os.environ.items() if k != "MIND_REPO"}
     env["CLAUDE_PLUGIN_ROOT"] = str(PLUGIN)
@@ -113,9 +125,7 @@ def repo(tmp_path):
     _git(["commit", "-q", "-m", "init"], seed)
     _git(["push", "-q", "origin", "main"], seed)
     home = tmp_path / "home"
-    env = {"MIND_REPO": str(bare), "MIND_HOME": str(home),
-           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+    env = {"MIND_REPO": str(bare), "MIND_HOME": str(home)}
     cfg = mind.Config.from_env(env, tmp_path)
     assert mind.ensure_checkout(cfg) is None
     return cfg, bare, seed
@@ -132,6 +142,28 @@ def test_config_from_env_defaults(tmp_path):
 def test_config_requires_repo(tmp_path):
     with pytest.raises(mind.ConfigError, match="MIND_REPO is not set"):
         mind.Config.from_env({}, tmp_path)
+
+
+def test_config_env_defaults_to_os_environ(tmp_path):
+    cfg = mind.Config.from_env({"MIND_REPO": "x"}, tmp_path)
+    assert cfg.env is os.environ
+
+
+def test_git_builds_environment_from_cfg_env_not_os_environ(repo):
+    """git() must source its subprocess environment from cfg.env, so a
+    Config built with a scoped env dict is not silently overridden by the
+    live process environment (which the isolation fixture also patches)."""
+    cfg, bare, _ = repo
+    custom_env = dict(os.environ)
+    custom_env.update({
+        "GIT_AUTHOR_NAME": "custom-author", "GIT_AUTHOR_EMAIL": "custom@example.com",
+        "GIT_COMMITTER_NAME": "custom-committer", "GIT_COMMITTER_EMAIL": "custom@example.com",
+    })
+    custom_cfg = dataclasses.replace(cfg, env=custom_env)
+    (custom_cfg.home / "x.md").write_text("x\n")
+    mind.commit_all(custom_cfg, "mind: test identity")
+    author = _git(["log", "-1", "--format=%an"], custom_cfg.home).stdout.strip()
+    assert author == "custom-author"
 
 
 def test_ensure_checkout_clones_once(repo):

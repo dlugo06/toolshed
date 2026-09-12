@@ -123,6 +123,7 @@ class Config:
     home: Path
     token: str | None
     project: str | None
+    env: dict = dataclasses.field(default_factory=lambda: os.environ)
 
     @classmethod
     def from_env(cls, env, cwd: Path) -> "Config":
@@ -147,7 +148,7 @@ def git_base_args(cfg: Config) -> list[str]:
 
 
 def git(cfg: Config, args: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
+    env = dict(cfg.env)
     if cfg.token:
         env["MIND_TOKEN"] = cfg.token
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
