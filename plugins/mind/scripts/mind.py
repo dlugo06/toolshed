@@ -747,7 +747,10 @@ def _draft_count(cfg: Config) -> int:
 def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
     out = []
     if event in ("startup", "resume"):
-        msg = pull(cfg)
+        # sync(), not a bare pull: a note committed locally (e.g. a push that
+        # failed at the end of a previous /mind:remember) must actually go
+        # out on the next startup/resume, not just stay promised forever.
+        msg = sync(cfg)
         if msg:
             out.append(msg + "\n")
         else:

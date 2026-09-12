@@ -1169,6 +1169,21 @@ def test_cmd_inject_without_project(repo, tmp_path):
     assert out.endswith("\n# Projects\n")
 
 
+def test_cmd_inject_startup_pushes_local_unpushed_commit(repo, tmp_path):
+    """The push-failed message promises the note will go out "on the next
+    remember or session start": inject on startup/resume must actually
+    push, not just pull, or that promise is a lie."""
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    (cfg.home / "unpushed.md").write_text("local only\n")
+    mind.commit_all(cfg, "mind: local unpushed")
+    log_before = _git(["log", "--format=%s", "main"], bare).stdout.splitlines()
+    assert "mind: local unpushed" not in log_before
+    mind.cmd_inject(cfg, "startup", tmp_path)
+    log_after = _git(["log", "--format=%s", "main"], bare).stdout.splitlines()
+    assert "mind: local unpushed" in log_after
+
+
 def test_cmd_inject_compact_makes_no_network_call(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
