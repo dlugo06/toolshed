@@ -1053,16 +1053,26 @@ def cmd_stale(cfg: Config, days: int, all_projects: bool, cwd: Path) -> str:
     for prefix, n in _scoped_notes(cfg, all_projects, None, cwd):
         if n.status != "accepted":
             continue
-        age = _age_days(str(n.meta.get("affirmed") or ""))
+        affirmed = n.meta.get("affirmed")
+        if not affirmed:
+            # A null `affirmed` is valid per validate_meta and always older
+            # than any --days threshold; it must sort first, but must never
+            # print as "(1000000 days)".
+            rows.append((10**6, prefix, n, None))
+            continue
+        age = _age_days(str(affirmed))
         if age > days:
-            rows.append((age, prefix, n))
+            rows.append((age, prefix, n, age))
     if not rows:
         return "mind: nothing stale"
     rows.sort(key=lambda r: (-r[0], r[1], r[2].id))
     out = []
-    for age, prefix, n in rows:
+    for _, prefix, n, age in rows:
         strength = n.strength + (" (must, no decay)" if n.strength == "must" else "")
-        out.append(f"{prefix}{n.id} | {n.title} | {n.meta.get('scope')} | {strength} | {n.meta.get('affirmed')} | {age} days\n")
+        if age is None:
+            out.append(f"{prefix}{n.id} | {n.title} | {n.meta.get('scope')} | {strength} | none | no affirmed date\n")
+        else:
+            out.append(f"{prefix}{n.id} | {n.title} | {n.meta.get('scope')} | {strength} | {n.meta.get('affirmed')} | {age} days\n")
     return "".join(out)
 
 
@@ -1160,9 +1170,13 @@ def cmd_lint(cfg: Config, days: int) -> str:
             rows.append(f"stub: {slug}")
     for p, n in notes:
         if n.status == "accepted":
-            age = _age_days(str(n.meta.get("affirmed") or ""))
-            if age > days:
-                rows.append(f"stale: {p}{n.id} ({age} days)")
+            affirmed = n.meta.get("affirmed")
+            if not affirmed:
+                rows.append(f"stale: {p}{n.id} (no affirmed date)")
+            else:
+                age = _age_days(str(affirmed))
+                if age > days:
+                    rows.append(f"stale: {p}{n.id} ({age} days)")
     global_notes = [n for p, n in notes if p == ""]
     accepted = [n for n in global_notes if n.status == "accepted"]
     projects_idx = build_projects_index(cfg)

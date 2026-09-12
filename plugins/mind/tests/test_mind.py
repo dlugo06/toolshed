@@ -2170,6 +2170,22 @@ def test_stale_affirm_retire(repo, tmp_path, monkeypatch):
     assert _git(["log", "--format=%s", "main", "-2"], bare).stdout.splitlines() == ["mind: retire PREF-REV-002", "mind: affirm PREF-REV-001"]
 
 
+def test_stale_prints_no_affirmed_date_for_null_affirmed_and_sorts_first(repo, tmp_path, monkeypatch):
+    """L: `affirmed: null` is valid per validate_meta, but must read as "no
+    affirmed date", not "(1000000 days)" -- and such notes sort first."""
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Has date", "d")
+    for p in mind.global_notes_dir(cfg).glob("*.md"):
+        t = p.read_text().replace(f"affirmed: {dt.date.today().isoformat()}", "affirmed: 2026-01-01")
+        p.write_text(t)
+    _raw_note(cfg, "PREF-REV-002-null.md", id="PREF-REV-002", title="Null affirmed", affirmed=None)
+    monkeypatch.setattr(mind, "_today", lambda: "2026-07-01")
+    out = mind.cmd_stale(cfg, 90, False, tmp_path)
+    lines = out.splitlines()
+    assert lines[0] == "PREF-REV-002 | Null affirmed | global | should | none | no affirmed date"
+    assert lines[1] == "PREF-REV-001 | Has date | global | should | 2026-01-01 | 181 days"
+
+
 def _raw_note(cfg, name, **over):
     meta = {"id": "PREF-REV-001", "title": "T", "type": "preference", "stage": "review", "scope": "global",
             "strength": "should", "status": "accepted", "affirmed": "2026-09-01", "supersedes": None, "source": "t"}
@@ -2232,6 +2248,17 @@ def test_lint_duplicate_id_row_between_mismatch_and_dangling(repo):
     assert (lines.index("mismatch: global/notes/PREF-REV-005-z.md id=PREF-REV-006")
             < lines.index("duplicate id: global/notes/PREF-REV-001-a.md and global/notes/PREF-REV-001-b.md")
             < lines.index("dangling: PREF-REV-004 supersedes PREF-REV-999"))
+
+
+def test_lint_reports_no_affirmed_date_for_null_affirmed(repo):
+    """L: lint's stale row must never print "(1000000 days)" for a null
+    `affirmed`; it must always flag it (a null date is always at least as
+    stale as any --days threshold) but say why in words."""
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    _raw_note(cfg, "PREF-REV-001-t.md", affirmed=None)
+    out = mind.cmd_lint(cfg, 180)
+    assert "stale: PREF-REV-001 (no affirmed date)\n" in out
+    assert "1000000" not in out
 
 
 def test_lint_reports_budget_overflow(repo, tmp_path, monkeypatch):
