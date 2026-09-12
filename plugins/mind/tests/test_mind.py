@@ -433,3 +433,41 @@ def test_cmd_accept_flips_draft(repo, tmp_path):
     assert meta["affirmed"] == dt.date.today().isoformat()
     with pytest.raises(mind.ValidationError, match="no note with id NOPE-X-001"):
         mind.cmd_accept(cfg, "NOPE-X-001")
+
+
+def _add(cfg, tmp_path, title, body, stage="review", status="accepted", scope="global", cwd=None):
+    d = tmp_path / f"{mind._kebab(title)}.md"
+    d.write_text(mind.render_frontmatter({"title": title, "type": "preference", "stage": stage, "strength": "should", "status": status}, body + "\n"))
+    return mind.cmd_add(cfg, d, scope, None, cwd or tmp_path)
+
+
+def test_cmd_ask_ranks_by_terms_hit_and_scopes(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Reply to review threads, never resolve them", "Threads stay open for the owner.")
+    _add(cfg, tmp_path, "Squash merge every PR", "One commit per PR on the default branch.")
+    work = tmp_path / "proj-a"
+    work.mkdir()
+    _add(cfg, tmp_path, "Resolve threads only on trivial nits", "Project-local exception.", scope="project", cwd=work)
+    other = tmp_path / "proj-b"
+    other.mkdir()
+    _add(cfg, tmp_path, "Threads in project b", "Unrelated.", scope="project", cwd=other)
+
+    out = mind.cmd_ask(cfg, ["resolve", "threads"], False, None, False, work)
+    assert out == (
+        "PREF-REV-001 | Reply to review threads, never resolve them | global | should\n"
+        "  Threads stay open for the owner.\n"
+        "proj-a/PREF-REV-001 | Resolve threads only on trivial nits | project:proj-a | should\n"
+        "  Project-local exception.\n"
+    )
+    out_all = mind.cmd_ask(cfg, ["threads"], True, None, False, work)
+    assert "proj-b/PREF-REV-001 | Threads in project b | project:proj-b | should" in out_all
+    assert mind.cmd_ask(cfg, ["kubernetes"], False, None, False, work) == "mind: no note matches 'kubernetes'"
+
+
+def test_cmd_ask_drafts_lists_only_drafts(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Accepted one", "a")
+    _add(cfg, tmp_path, "Draft one", "d", status="draft")
+    assert mind.cmd_ask(cfg, [], False, None, True, tmp_path) == "PREF-REV-002 | Draft one | global | should | draft\n  d\n"

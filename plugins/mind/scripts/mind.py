@@ -431,6 +431,40 @@ def cmd_accept(cfg: Config, note_id: str) -> str:
     return f"mind: accepted {note_id}, " + (msg or "pushed")
 
 
+def _scoped_notes(cfg: Config, all_projects: bool, project: str | None, cwd: Path) -> list[tuple[str, Note]]:
+    rows = [("", n) for n in load_notes(global_notes_dir(cfg))]
+    if all_projects:
+        slugs = list_projects(cfg)
+    else:
+        slug = match_project(cfg, project or resolve_candidate(cfg, cwd))
+        slugs = [slug] if slug else []
+    for slug in slugs:
+        rows += [(slug + "/", n) for n in load_notes(project_notes_dir(cfg, slug))]
+    return rows
+
+
+def cmd_ask(cfg: Config, terms: list[str], all_projects: bool, project: str | None, drafts: bool, cwd: Path) -> str:
+    wanted = "draft" if drafts else "accepted"
+    lowered = [t.lower() for t in terms]
+    scored = []
+    for prefix, note in _scoped_notes(cfg, all_projects, project, cwd):
+        if note.status != wanted:
+            continue
+        hay = (note.title + "\n" + note.body).lower()
+        hits = sum(1 for t in lowered if t in hay)
+        if hits or not lowered:
+            scored.append((-hits, prefix, note.id, prefix, note))
+    if not scored:
+        return f"mind: no note matches '{' '.join(terms)}'"
+    out = []
+    for _, _, _, prefix, note in sorted(scored, key=lambda r: (r[0], r[1], r[2]))[:10]:
+        line = f"{prefix}{note.id} | {note.title} | {note.meta.get('scope', 'global')} | {note.strength}"
+        if drafts:
+            line += " | draft"
+        out.append(line + "\n  " + note.first_paragraph + "\n")
+    return "".join(out)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mind.py", add_help=True)
     sub = p.add_subparsers(dest="cmd")
@@ -474,6 +508,8 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
             msg = ensure_checkout(cfg) or cmd_add(cfg, Path(args.draft), args.scope, args.project, cwd)
         elif args.cmd == "accept":
             msg = ensure_checkout(cfg) or cmd_accept(cfg, args.note_id)
+        elif args.cmd == "ask":
+            msg = ensure_checkout(cfg) or cmd_ask(cfg, args.terms, args.all, args.project, args.drafts, cwd)
         elif args.cmd == "reindex":
             reindex(cfg)
             msg = "mind: reindexed"
