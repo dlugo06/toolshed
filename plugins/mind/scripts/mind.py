@@ -150,6 +150,19 @@ class ConfigError(Exception):
     pass
 
 
+_REPO_SCHEME_RE = re.compile(r"^(?:ssh|https|file)://|^[^@/\s]+@[^:/\s]+:")
+
+
+def _validate_repo_url(repo: str) -> None:
+    """`--` blocks option injection at the clone call, but not a transport
+    like `ext::sh -c ...`, which executes at clone time. Allow only the
+    documented forms: ssh://, git@host:, https://, file://, or an absolute
+    path."""
+    if repo.startswith("/") or _REPO_SCHEME_RE.match(repo):
+        return
+    raise ConfigError("MIND_REPO must be an ssh, https, file URL or absolute path")
+
+
 @dataclasses.dataclass(frozen=True)
 class Config:
     repo: str
@@ -163,6 +176,7 @@ class Config:
         repo = env.get("MIND_REPO")
         if not repo:
             raise ConfigError("MIND_REPO is not set")
+        _validate_repo_url(repo)
         if env.get("MIND_HOME"):
             home = Path(env["MIND_HOME"])
         elif env.get("CLAUDE_PLUGIN_DATA"):

@@ -223,7 +223,7 @@ def test_config_from_env_defaults(tmp_path):
     cfg = mind.Config.from_env({"MIND_REPO": "git@x:y/z.git", "CLAUDE_PLUGIN_DATA": str(tmp_path)}, tmp_path)
     assert cfg.home == tmp_path / "repo"
     assert cfg.token is None
-    cfg2 = mind.Config.from_env({"MIND_REPO": "u", "HOME": str(tmp_path)}, tmp_path)
+    cfg2 = mind.Config.from_env({"MIND_REPO": "/u", "HOME": str(tmp_path)}, tmp_path)
     assert cfg2.home == tmp_path / ".mind" / "repo"
 
 
@@ -233,8 +233,21 @@ def test_config_requires_repo(tmp_path):
 
 
 def test_config_env_defaults_to_os_environ(tmp_path):
-    cfg = mind.Config.from_env({"MIND_REPO": "x"}, tmp_path)
+    cfg = mind.Config.from_env({"MIND_REPO": "/x"}, tmp_path)
     assert cfg.env is os.environ
+
+
+def test_config_rejects_disallowed_repo_url_scheme(tmp_path):
+    """`--` blocks option injection at the clone call, but not a transport
+    like ext::sh -c ..., which executes at clone time."""
+    with pytest.raises(mind.ConfigError, match="MIND_REPO must be an ssh, https, file URL or absolute path"):
+        mind.Config.from_env({"MIND_REPO": "ext::sh -c touch pwned"}, tmp_path)
+
+
+def test_config_accepts_every_documented_repo_url_form(tmp_path):
+    for repo in ("ssh://git@host/o/r.git", "git@host:o/r.git", "https://host/o/r.git",
+                 "file:///tmp/r.git", "/abs/path/r.git"):
+        assert mind.Config.from_env({"MIND_REPO": repo}, tmp_path).repo == repo
 
 
 def test_git_builds_environment_from_cfg_env_not_os_environ(repo):
@@ -510,14 +523,14 @@ def test_ensure_checkout_reports_broken_checkout_when_git_dir_has_no_head(tmp_pa
     as broken, not pass as a healthy (if empty) checkout."""
     home = tmp_path / "h"
     (home / ".git").mkdir(parents=True)
-    cfg = mind.Config.from_env({"MIND_REPO": "irrelevant", "MIND_HOME": str(home)}, tmp_path)
+    cfg = mind.Config.from_env({"MIND_REPO": "/irrelevant", "MIND_HOME": str(home)}, tmp_path)
     msg = mind.ensure_checkout(cfg)
     assert msg == f"mind: checkout at {home} is broken, delete it and rerun"
 
 
 def test_ensure_checkout_removes_partial_dir_on_clone_timeout(tmp_path, monkeypatch):
     home = tmp_path / "h"
-    cfg = mind.Config.from_env({"MIND_REPO": "irrelevant", "MIND_HOME": str(home)}, tmp_path)
+    cfg = mind.Config.from_env({"MIND_REPO": "/irrelevant", "MIND_HOME": str(home)}, tmp_path)
 
     def fake_git(c, args, cwd, timeout):
         if args and args[0] == "clone":
@@ -533,7 +546,7 @@ def test_ensure_checkout_removes_partial_dir_on_clone_timeout(tmp_path, monkeypa
 
 def test_ensure_checkout_removes_partial_dir_on_clone_failure(tmp_path, monkeypatch):
     home = tmp_path / "h"
-    cfg = mind.Config.from_env({"MIND_REPO": "irrelevant", "MIND_HOME": str(home)}, tmp_path)
+    cfg = mind.Config.from_env({"MIND_REPO": "/irrelevant", "MIND_HOME": str(home)}, tmp_path)
 
     def fake_git(c, args, cwd, timeout):
         if args and args[0] == "clone":
