@@ -673,7 +673,8 @@ def test_cmd_inject_truncates_global_first(repo, tmp_path, monkeypatch):
     work.mkdir()
     _add(cfg, tmp_path, "Project rule", "p", scope="project", cwd=work)
     out = mind.cmd_inject(cfg, "clear", work)
-    assert "+" in out and "more, run /mind:ask <topic>" in out
+    assert "\n+7 more, run /mind:ask <topic>\n" in out                # exact cut count, not "+1"
+    assert "- PREF-REV-001 | Global rule number 0 with a long enough title to fill | should" in out
     assert "- PREF-REV-001 | Project rule | should" in out          # project index intact
     assert "- proj-a | proj-a |" in out                               # projects index intact
     assert "Global rule number 7" not in out

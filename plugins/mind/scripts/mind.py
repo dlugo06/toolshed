@@ -567,13 +567,16 @@ def _fit(global_idx: str, project_idx: str, projects_idx: str) -> tuple[str, str
     total = len(global_idx) + len(project_idx)
     if total <= budget:
         return global_idx, project_idx
-    # Shrink global row by row, then project.
+    # Shrink global row by row, then project. Each cut is taken from the
+    # original section, not from the previous pass's already-truncated
+    # output, so the "+N more" count stays correct across every iteration.
+    original_global, original_project = global_idx, project_idx
     for idx_name in ("global", "project"):
-        cur = global_idx if idx_name == "global" else project_idx
-        rows = sum(1 for l in cur.splitlines() if l.startswith("- "))
+        original = original_global if idx_name == "global" else original_project
+        rows = sum(1 for l in original.splitlines() if l.startswith("- "))
         while rows > 0 and len(global_idx) + len(project_idx) > budget:
             rows -= 1
-            cur = _truncate(cur, rows)
+            cur = _truncate(original, rows)
             if idx_name == "global":
                 global_idx = cur
             else:
