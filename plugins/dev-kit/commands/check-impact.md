@@ -23,4 +23,4 @@ Launch the **behavioral-impact-checker** agent (`model: "sonnet"`, passed explic
    - **CLEAR** → "No behavioral conflicts found. Safe to proceed with `/dev-kit:plan-tests`."
    - **CONFLICTS FOUND** → Show the conflict list and options: update the plan, update the register row (and its spec), or add explicit acknowledgment to the plan.
 
-In an orchestrator run, the orchestrator rules on each conflict itself from the plan's Rulings, the spec, and stored preferences, amends the plan, and records `impact_checked` only after `ls` confirms the report file exists.
+In an orchestrator run, the orchestrator rules on each conflict itself from the plan's Rulings, the spec, and stored preferences, amends the plan, and records `impact_checked` only after `ls` confirms the report file exists. Each ruling ends with `[per <ID>]` (a mind note) or `[provisional]`.
