@@ -783,9 +783,6 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
             msg = "mind: reindexed"
         elif args.cmd == "sync":
             msg = sync(cfg, pull_only=args.pull_only) or "mind: in sync"
-        else:
-            print(USAGE, file=sys.stderr)
-            return 2
     except ValidationError as exc:
         print(f"mind: {exc}", file=sys.stderr)
         return 1
