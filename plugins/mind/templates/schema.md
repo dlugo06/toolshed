@@ -34,8 +34,8 @@ Type semantics:
   `refers: [ID-A, ID-B]`.
 
 ID scheme: `<TYPE>-<STAGE>-<NNN>`, with type codes PRIN, PREF, DEC, PROC,
-GOT, REF and stage codes ID, PROD, PLAN, DEV, TEST, REV, REL, DEPLOY, MON,
-SEC. Numbers are assigned per scope folder, so a project note is cited with
+GOT, REF, PREC and stage codes ID, PROD, PLAN, DEV, TEST, REV, REL, DEPLOY,
+MON, SEC. Numbers are assigned per scope folder, so a project note is cited with
 its slug: `acme-api/GOT-DEPLOY-004`. A global note is cited bare.
 
 Status semantics: only `accepted` notes appear in injected indexes. `draft`

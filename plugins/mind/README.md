@@ -47,7 +47,7 @@ Only note files and `project.md` are authored and committed. Every `index.md` is
 ---
 id: PREF-REV-003
 title: Never auto-approve during process-review
-type: preference      # principle | preference | decision | procedure | gotcha | reference
+type: preference      # principle | preference | decision | procedure | gotcha | reference | precedence
 stage: review         # identity | product | planning | development | testing | review | release | deployment | monitoring | security
 scope: global         # global | project:<slug>
 strength: must        # must | should | default | optional
@@ -55,6 +55,7 @@ status: accepted      # draft | accepted | superseded | deprecated
 affirmed: 2026-09-11  # last date the owner confirmed it
 supersedes: null      # ID of the note this replaces, if any
 source: CLAUDE.md, acme-api, 2026-09-11   # where the claim came from
+refers: [PREF-REV-001, PREF-REV-002]      # precedence only: the two IDs it rules between
 ---
 One or two sentences stating the claim.
 
@@ -64,11 +65,13 @@ One or two sentences stating the claim.
 
 Required fields on `add`: `title`, `type`, `stage`, `strength`. Defaults: `status: accepted`, `affirmed: today`, `scope` from the `--scope` flag, `source: session <date>, <slug>`. Unknown enum values are rejected. Only `accepted` notes appear in injected indexes; `draft` notes are counted in the injection and listed by `--drafts`; `superseded` and `deprecated` notes stay on disk for history and never inject. The full contract, including the writing rules, lives in `schema.md` inside the data repo (written by `init` from `templates/schema.md`).
 
+`init` writes `schema.md` once; upgrading the plugin never rewrites an existing data repo's copy. After upgrading to 0.2.0, re-copy `templates/schema.md` into the data repo by hand to pick up the `precedence` type and `refers` field — `inject` prints `mind: schema.md predates 0.2.0, re-copy templates/schema.md` as a reminder whenever the data repo's `schema.md` is still missing the word `precedence`.
+
 ## Session start
 
 `hooks/hooks.json` registers a SessionStart command hook on `startup|resume|clear|compact` running `scripts/session-start.sh`, which exits 0 doing nothing when `MIND_REPO`, `python3`, or `git` is missing, and otherwise runs `mind.py inject --event <source>`. On `startup` and `resume` it syncs first: pull (10 s timeout), then push any local commit that is still unpushed (e.g. from a `/mind:remember` whose own push earlier failed) — a failure at either step prints one line and continues with the cached copy; `clear` and `compact` never touch the network.
 
-It prints, in order: the protocol line, the mode line (`Mode: apply notes silently and cite | confirm before applying a note. Conflicts: use precedence notes | always ask.`, from `settings.json`), the global index, the current project's index (or "no notes for `<candidate>` yet"), the projects index, and the draft count when non-zero ("1 draft awaits acceptance" or "N drafts await acceptance: run /mind:ask --drafts"). The three indexes together are capped at 4,000 characters (`INDEX_BUDGET`): the global index is truncated first, then the project index, and the projects index is never truncated. Within a truncated section, every `must`-strength row is kept first, then one row per stage in round-robin order, so a large mind never hides a whole stage or a hard rule under a tight budget. On `startup`/`resume` it also prints the open-proposal count and URL (from `proposals`, cached for `clear`/`compact`) and, once 20 or more prompts are pending, a reminder to run `/mind:digest`.
+It prints, in order: the protocol line, the mode line (`Mode: apply notes silently and cite | confirm before applying a note. Conflicts: use precedence notes | always ask.`, from `settings.json`), the global index, the current project's index (or "no notes for `<candidate>` yet"), the projects index, and the draft count when non-zero ("1 draft awaits acceptance" or "N drafts await acceptance: run /mind:ask --drafts"). The three indexes together are capped at 4,000 characters (`INDEX_BUDGET`): the global index is truncated first, then the project index, and the projects index is never truncated. Within a truncated section, every `must`-strength row is kept first, then one row per stage in round-robin order, so a large mind never hides a whole stage or a hard rule under a tight budget. On `startup`/`resume` it also prints the open-proposal count and URL (from `proposals`, cached for `clear`/`compact`), capped at 5 rows total (the count line's own proposal counts as one) with a `+N more, run mind.py proposals` line beyond that, and, once 20 or more prompts are pending, a reminder to run `/mind:digest`.
 
 ## Skills
 
@@ -82,7 +85,7 @@ It prints, in order: the protocol line, the mode line (`Mode: apply notes silent
 
 Anything an agent infers rather than the owner stating directly — a `/mind:digest` batch, a seeding pass — is proposed, not added: `mind.py propose <draft.md>... --topic <t> [--scope global|project] [--project slug] [--body <file>]` writes each draft as an accepted note (merging the PR is the acceptance) inside a **temporary git worktree**, never the shared checkout — a concurrent `inject`/`ask`/`add`/`lint` on `MIND_HOME` can never see an unmerged proposal as an accepted note. The branch is `propose/<YYYY-MM-DD>-<topic>`, started from `origin/<branch>` when it already exists (so a second `propose` call to the same topic adds to the same PR) or from `origin/main`; one commit per note (`mind: propose <ID> <title>`), then a push and, with `gh` on PATH and authenticated, `gh pr create --base main --head <branch>` (title `mind: <topic> (<N> notes)`, body one line per note plus its first paragraph, or `--body <file>`). Without `gh`, it prints the branch name and "open the PR by hand". A draft naming an existing note in `supersedes` flips that note to `status: superseded` inside the same branch. The worktree is always removed, success or failure; a failed push leaves the branch committed locally ("`mind: proposal branch <name> is committed locally; push failed`") for a later retry.
 
-`mind.py proposals` lists every open `propose/*` branch on the remote with its PR URL, plus any local branch that never reached the remote, tagged `(unpushed)`.
+`mind.py proposals` lists every `propose/*` branch not yet merged into `origin/main` (`--no-merged origin/main` on both the remote and local listings), with its PR URL, plus any local branch that never reached the remote, tagged `(unpushed)`. A merged proposal drops off the list permanently once merged — whether or not GitHub or the owner ever deletes the remote branch — and a local `propose/*` branch proven merged into `origin/main` is deleted automatically, so a stuck-looking `(unpushed)` branch never nags forever after its PR lands.
 
 ## Passive capture and digest
 
@@ -92,11 +95,11 @@ Anything an agent infers rather than the owner stating directly — a `/mind:dig
 
 A `precedence` note (code `PREC`) states which of two conflicting notes wins, with an optional `refers: [ID, ID]` list field; body convention: "When `<ID-A>` conflicts with `<ID-B>`, `<ID-A>` wins when `<condition>`." `ask` promotes a matching precedence note to the front, tagged `[precedence]`, whenever a query's other hits share a stage.
 
-Per-machine toggles live in `<MIND_HOME>/../settings.json` (override `MIND_SETTINGS`): `{"auto_answer": true, "escalate": false}`, defaults applied when the file is missing. `mind.py settings --set key=value` (repeatable) reads or writes it; `inject`'s mode line reflects the current values.
+Per-machine toggles live in `<MIND_HOME>/../settings.json` (override `MIND_SETTINGS`): `{"auto_answer": true, "escalate": false}`, defaults applied when the file is missing. `mind.py settings --set key=value` (repeatable) reads or writes it; `inject`'s mode line reflects the current values. A value outside `true/false/1/0/yes/no/on/off` is rejected rather than silently coerced to `false`.
 
 ## Doctor
 
-`mind.py doctor` is read-only — it never clones or mutates `MIND_HOME` — and prints one line per check: the redacted config, checkout state (`ok`/`missing`/`broken (<reason>)`), whether `main` tracks `origin/main`, remote reachability (`git ls-remote`, with timing or a redacted error), the configured git identity, `gh` version and auth status, pending-file counts and watermark, the current settings, and note counts (accepted/draft/malformed/projects). Useful for diagnosing a second machine or a cloud session where the mind "isn't working."
+`mind.py doctor` is read-only — it never clones or mutates `MIND_HOME` — and prints one line per check: the redacted config, checkout state (`ok`/`missing`/`broken (<reason>)`), whether `main` tracks `origin/main`, remote reachability (`git ls-remote`, with timing or a redacted error), the configured git identity, `gh` version and auth status, pending-file counts and watermark, the current settings, and note counts (accepted/draft/malformed/projects). Useful for diagnosing a second machine or a cloud session where the mind "isn't working." With `MIND_REPO` unset, `doctor` still exits 0 and prints `config: MIND_REPO=unset ...` and `remote: unreachable (MIND_REPO not set)`, then every other line that needs no repo — it never exits 1 on the one command whose whole point is diagnosing a broken setup.
 
 ## Subcommands
 
@@ -108,13 +111,13 @@ One script, `scripts/mind.py`, stdlib only:
 | `inject --event E` | sync — pull, then push if ahead (on `startup`/`resume`) — print the budgeted indexes, mode line, proposals/pending lines, draft count, and malformed-note count |
 | `add <draft.md> --scope global\|project [--project slug]` | validate frontmatter, assign ID, write the note, reindex, commit `mind: add <ID> <title>`, sync, print the ID and sync outcome |
 | `propose <draft.md>... --topic t [--scope global\|project] [--project slug] [--body file]` | write each draft as an accepted note on a `propose/<date>-<topic>` branch in a temporary worktree, push, open (or reuse) a PR |
-| `proposals` | list open `propose/*` branches with their PR URL, including unpushed local branches |
+| `proposals` | list `propose/*` branches not yet merged into `origin/main` with their PR URL, including unpushed local branches; a merged local branch is deleted |
 | `ask <terms...> [--all] [--project slug] [--drafts] [--limit N] [--stage stage]` | whole-word, case-insensitive term match over title and body of accepted notes in global plus the current project (`--all`: every project); rank by terms hit; print up to `--limit` (default 10) rows, narrowed by `--stage`; a matching precedence note is promoted to the front |
 | `pending [--since ts] [--limit N]` / `pending --mark ts` | print unprocessed captured prompts as JSON, or record the digest watermark |
 | `stale [--days 90] [--all]` | list accepted notes whose `affirmed` date is older than the threshold, oldest first |
 | `affirm <ID> [--strength must\|should\|default\|optional]` | set `affirmed: today`, optionally change `strength`, commit, sync |
 | `retire <ID>` | set `status: deprecated`, commit, sync |
-| `lint [--days 180]` | report malformed notes, filename/ID mismatches, dangling references, unsuperseded pairs, duplicate titles, stub projects, stale notes, and injection-budget overflow |
+| `lint [--days 180]` | report malformed notes, filename/ID mismatches, duplicate IDs across files, dangling references, unsuperseded pairs, duplicate titles, stub projects, stale notes, and injection-budget overflow |
 | `settings [--set key=value]` | read or write `<MIND_HOME>/../settings.json` |
 | `doctor` | print a diagnostic line per check; read-only, never clones |
 | `reindex` | regenerate every `index.md` from notes |
