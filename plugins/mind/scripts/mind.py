@@ -219,16 +219,36 @@ def push(cfg: Config) -> str | None:
     return None
 
 
+def _conflicted_paths(cfg: Config) -> list[str]:
+    proc = git(cfg, ["diff", "--name-only", "--diff-filter=U"], cfg.home, 5)
+    return [line for line in proc.stdout.splitlines() if line]
+
+
+def _rebase_failure_message(cfg: Config, ran: bool) -> str:
+    conflicts = _conflicted_paths(cfg) if ran else []
+    git(cfg, ["rebase", "--abort"], cfg.home, 5)
+    if conflicts:
+        return f"mind: sync conflict in {', '.join(conflicts)}, resolve by hand in {cfg.home}"
+    return f"mind: offline, using cached copy from {_head_date(cfg)}"
+
+
+def _rebase_onto_upstream(cfg: Config) -> str | None:
+    """Run `pull --rebase`. Returns an error message on failure, else None."""
+    try:
+        proc = git(cfg, ["pull", "-q", "--rebase"], cfg.home, GIT_TIMEOUTS["pull"])
+    except subprocess.TimeoutExpired:
+        proc = None
+    if proc is None or proc.returncode != 0:
+        return _rebase_failure_message(cfg, ran=proc is not None)
+    return None
+
+
 def sync(cfg: Config, pull_only: bool = False) -> str | None:
     if _has_upstream(cfg):
         if _ahead(cfg):
-            try:
-                proc = git(cfg, ["pull", "-q", "--rebase"], cfg.home, GIT_TIMEOUTS["pull"])
-            except subprocess.TimeoutExpired:
-                proc = None
-            if proc is None or proc.returncode != 0:
-                git(cfg, ["rebase", "--abort"], cfg.home, 5)
-                return f"mind: offline, using cached copy from {_head_date(cfg)}"
+            msg = _rebase_onto_upstream(cfg)
+            if msg:
+                return msg
         else:
             msg = pull(cfg)
             if msg:
@@ -346,6 +366,10 @@ def _today() -> str:
 def cmd_init(cfg: Config) -> str:
     schema = Path(__file__).resolve().parents[1] / "templates" / "schema.md"
     (cfg.home / "schema.md").write_text(schema.read_text())
+    # Indexes are generated from notes, never hand-edited, and never committed:
+    # two machines regenerating the same index.md would otherwise be the one
+    # file every concurrent add/accept can conflict on.
+    (cfg.home / ".gitignore").write_text("**/index.md\n")
     global_notes_dir(cfg).mkdir(parents=True, exist_ok=True)
     (cfg.home / "projects").mkdir(exist_ok=True)
     reindex(cfg)
@@ -376,6 +400,14 @@ def _write_note(cfg: Config, notes_dir: Path, meta: dict, body: str) -> Path:
     return path
 
 
+def _find_collision(notes_dir: Path, note_id: str, path: Path) -> Path | None:
+    """Return another file in notes_dir already claiming this note's ID, if any."""
+    for p in notes_dir.glob(f"{note_id}-*.md"):
+        if p != path:
+            return p
+    return None
+
+
 def cmd_add(cfg: Config, draft: Path, scope: str, project: str | None, cwd: Path) -> str:
     meta, body = parse_frontmatter(draft.read_text())
     errs = validate_meta(meta)
@@ -398,32 +430,36 @@ def cmd_add(cfg: Config, draft: Path, scope: str, project: str | None, cwd: Path
     # Pull first so the ID is assigned against the latest remote state.
     sync(cfg, pull_only=True)
     path = _write_note(cfg, notes_dir, meta, body)
+    collision = _find_collision(notes_dir, meta["id"], path)
+    if collision is not None:
+        path.unlink()
+        path = _write_note(cfg, notes_dir, meta, body)
     reindex(cfg)
     commit_all(cfg, f"mind: add {meta['id']} {meta['title']}")
-    msg = sync(cfg)
-    if msg and msg.startswith("mind: offline") and _conflicting_id(cfg, path):
-        # Another machine took this ID: back out, take the next free one, retry once.
-        git(cfg, ["reset", "-q", "--hard", "HEAD~1"], cfg.home, 10)
-        git(cfg, ["pull", "-q", "--ff-only"], cfg.home, GIT_TIMEOUTS["pull"])
-        path = _write_note(cfg, notes_dir, meta, body)
-        reindex(cfg)
-        commit_all(cfg, f"mind: add {meta['id']} {meta['title']}")
-        msg = sync(cfg)
+    msg = push(cfg)
+    if msg is not None:
+        # Push was rejected: the remote moved. Rebase onto it before trying
+        # again — different filenames never conflict in git, so the same ID
+        # added on another machine merges in cleanly and must be caught
+        # explicitly, before this (not yet pushed) commit goes out.
+        rebase_msg = _rebase_onto_upstream(cfg)
+        if rebase_msg:
+            msg = rebase_msg
+        else:
+            collision = _find_collision(notes_dir, meta["id"], path)
+            if collision is not None:
+                path.unlink()
+                path = _write_note(cfg, notes_dir, meta, body)
+                reindex(cfg)
+                git(cfg, ["add", "-A"], cfg.home, 10)
+                git(cfg, ["commit", "-q", "--amend", "-m", f"mind: add {meta['id']} {meta['title']}"], cfg.home, 10)
+            msg = push(cfg)
     note_id = parse_frontmatter(path.read_text())[0]["id"]
     scope_label = "global" if scope == "global" else f"project {prefix[:-1]}"
     result = f"mind: added {prefix}{note_id} ({scope_label}), " + (msg or "pushed")
     if created_stub:
         result += "; project.md is a stub, fill it in"
     return result
-
-
-def _conflicting_id(cfg: Config, path: Path) -> bool:
-    """True when the remote already has a different file with this note's ID."""
-    note_id = parse_frontmatter(path.read_text())[0]["id"]
-    git(cfg, ["fetch", "-q"], cfg.home, GIT_TIMEOUTS["pull"])
-    rel = path.relative_to(cfg.home).parent.as_posix()
-    listing = git(cfg, ["ls-tree", "--name-only", "@{u}", rel + "/"], cfg.home, 5).stdout.split()
-    return any(Path(p).name.startswith(note_id + "-") and Path(p).name != path.name for p in listing)
 
 
 def _find_note(cfg: Config, note_id: str) -> Note | None:
@@ -537,6 +573,11 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
         msg = pull(cfg)
         if msg:
             out.append(msg + "\n")
+        else:
+            # Indexes are gitignored, so a fresh clone (or one another
+            # machine just pushed notes into) has no up-to-date index.md
+            # on disk until it is regenerated locally.
+            reindex(cfg)
     out.append(PROTOCOL.format(home=cfg.home))
     global_idx = (cfg.home / "global" / "index.md").read_text() if (cfg.home / "global" / "index.md").is_file() else "# Global\n"
     candidate = resolve_candidate(cfg, cwd)

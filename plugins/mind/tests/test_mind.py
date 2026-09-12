@@ -221,10 +221,11 @@ def test_token_goes_on_command_line_not_disk(repo):
     assert "sekrit" not in (cfg.home / ".git" / "config").read_text()
 
 
-def test_sync_rebase_content_conflict_returns_offline_line(repo):
+def test_sync_rebase_content_conflict_returns_sync_conflict_message(repo):
     """Two checkouts write the same relative path directly: a genuine content
-    conflict, not a timeout. sync() must abort the rebase cleanly and report
-    offline, leaving no rebase state or conflict markers behind."""
+    conflict on a real (non-index) file. sync() must abort the rebase cleanly
+    and report a sync conflict naming the file for hand resolution, leaving
+    no rebase state or conflict markers behind."""
     cfg, bare, seed = repo
     (cfg.home / "clash.md").write_text("mine\n")
     mind.commit_all(cfg, "mind: add clash (local)")
@@ -233,7 +234,7 @@ def test_sync_rebase_content_conflict_returns_offline_line(repo):
     _git(["commit", "-q", "-m", "clash (remote)"], seed)
     _git(["push", "-q"], seed)
     msg = mind.sync(cfg)
-    assert msg.startswith("mind: offline, using cached copy from ")
+    assert msg == f"mind: sync conflict in clash.md, resolve by hand in {cfg.home}"
     status = _git(["status", "--porcelain"], cfg.home).stdout
     assert status == ""
 
@@ -360,6 +361,17 @@ def test_cmd_init_creates_layout_and_pushes(repo):
     assert _git(["log", "--format=%s", "main"], bare).stdout.splitlines()[0] == "mind: init"
 
 
+def test_cmd_init_writes_and_commits_gitignore_for_indexes(repo):
+    """Indexes are generated, never committed: init must ship a .gitignore
+    covering every index.md so no future add/accept ever tracks one."""
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    assert (cfg.home / ".gitignore").read_text() == "**/index.md\n"
+    tracked = _git(["ls-tree", "-r", "--name-only", "main"], bare).stdout.split()
+    assert ".gitignore" in tracked
+    assert not any(p.endswith("index.md") for p in tracked)
+
+
 def test_cmd_add_global_assigns_id_and_pushes(repo, tmp_path):
     cfg, bare, _ = repo
     mind.cmd_init(cfg)
@@ -428,10 +440,60 @@ def test_cmd_add_renames_on_duplicate_id_from_remote(repo, tmp_path, seed_note):
     assert names == ["PRIN-TEST-001-other.md", "PRIN-TEST-002-tests-must-assert-concrete-values.md"]
 
 
+def test_cmd_add_two_checkouts_different_ids_same_stage_both_land_on_remote(repo, tmp_path):
+    """Two independent checkouts add different-ID notes to the same stage at
+    once. Nothing collides (different type codes), so both notes must reach
+    the bare remote and neither triggers the collision-rename path."""
+    cfg_a, bare, _ = repo
+    mind.cmd_init(cfg_a)
+    home_b = tmp_path / "home_b"
+    cfg_b = dataclasses.replace(cfg_a, home=home_b)
+    assert mind.ensure_checkout(cfg_b) is None
+
+    draft_a = tmp_path / "a.md"
+    draft_a.write_text(DRAFT)
+    out_a = mind.cmd_add(cfg_a, draft_a, "global", None, tmp_path)
+    assert out_a == "mind: added PRIN-TEST-001 (global), pushed"
+
+    draft_b = tmp_path / "b.md"
+    draft_b.write_text(DRAFT.replace("type: principle", "type: gotcha").replace(
+        "Tests must assert concrete values", "Flaky test retried three times before it failed for real"))
+    out_b = mind.cmd_add(cfg_b, draft_b, "global", None, tmp_path)
+    assert out_b == "mind: added GOT-TEST-001 (global), pushed"
+
+    log = _git(["log", "--format=%s", "main"], bare).stdout.splitlines()
+    assert "mind: add PRIN-TEST-001 Tests must assert concrete values" in log
+    assert "mind: add GOT-TEST-001 Flaky test retried three times before it failed for real" in log
+    listing = _git(["ls-tree", "--name-only", "main", "global/notes/"], bare).stdout.split()
+    names = sorted(Path(p).name for p in listing)
+    assert names == [
+        "GOT-TEST-001-flaky-test-retried-three-times-before-it-failed-for-real.md",
+        "PRIN-TEST-001-tests-must-assert-concrete-values.md",
+    ]
+
+
+def test_cmd_inject_reindexes_after_pull_on_fresh_clone(repo, tmp_path):
+    """Indexes are gitignored: a fresh clone has no index.md at all. inject
+    must regenerate it locally after a successful pull, not show it empty."""
+    cfg_a, bare, _ = repo
+    mind.cmd_init(cfg_a)
+    _add(cfg_a, tmp_path, "Global rule", "g")
+    home_b = tmp_path / "home_b"
+    cfg_b = dataclasses.replace(cfg_a, home=home_b)
+    assert mind.ensure_checkout(cfg_b) is None
+    assert not (cfg_b.home / "global" / "index.md").is_file()
+    out = mind.cmd_inject(cfg_b, "startup", tmp_path)
+    assert "- PREF-REV-001 | Global rule | should" in out
+
+
 def test_cmd_add_two_checkouts_race_through_cmd_add(repo, tmp_path, monkeypatch):
     """Two independent checkouts (not a raw seeded push) both race cmd_add for
-    the same next ID. The loser's own _conflicting_id retry path lands it on
-    PRIN-TEST-002, and the bare remote ends with both 001 and 002 present."""
+    the same next ID. Neither collides at write time (each pulled before the
+    other pushed), but the loser's own final sync() rebases the winner's note
+    in cleanly (different filenames never conflict in git); the explicit
+    post-rebase ID-collision scan then catches the duplicate ID, deletes the
+    loser's own file, reassigns it to PRIN-TEST-002, and amends the commit
+    before pushing again. The bare remote ends with both 001 and 002 present."""
     cfg_a, bare, _ = repo
     mind.cmd_init(cfg_a)
     home_b = tmp_path / "home_b"
