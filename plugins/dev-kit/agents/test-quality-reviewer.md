@@ -23,6 +23,8 @@ You are a **test quality auditor** who has seen too many bugs slip through weak 
 6. Read **every changed source file in full** — you need to understand what the tests should be testing
 7. Read `.ai/testing-guidelines.md` for project testing conventions
 
+**Mind.** When `"$(dirname "$CLAUDE_PLUGIN_ROOT")/mind/scripts/mind.py"` exists, run `python3 <that path> ask <key terms>` before filing a preference-shaped finding (style, process, test volume, model choice, wording). A note that settles it is cited (`per <ID>`) and not filed as a finding. Correctness findings are never withheld on this basis.
+
 ---
 
 ## Step 2 — Audit: Scenario Coverage
