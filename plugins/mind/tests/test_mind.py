@@ -1394,6 +1394,25 @@ def test_cmd_inject_reports_malformed_note_count_and_hides_off_enum_stage(repo, 
     assert f"1 malformed notes skipped, see {cfg.home}\n" in out
 
 
+def test_cmd_inject_warns_when_schema_predates_0_2_0(repo, tmp_path):
+    """L schema: a data repo's schema.md written by a pre-0.2.0 `init` has
+    no `precedence` type documented; `inject` must nudge the owner to
+    re-copy templates/schema.md rather than leave `refers`/`precedence`
+    undocumented forever (init only ever writes schema.md once)."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    (cfg.home / "schema.md").write_text("# schema\nno mention of the new type here\n")
+    out = mind.cmd_inject(cfg, "compact", tmp_path)
+    assert "mind: schema.md predates 0.2.0, re-copy templates/schema.md\n" in out
+
+
+def test_cmd_inject_no_schema_warning_when_precedence_documented(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)   # writes the current templates/schema.md, which documents precedence
+    out = mind.cmd_inject(cfg, "compact", tmp_path)
+    assert "predates 0.2.0" not in out
+
+
 def test_cmd_inject_without_project(repo, tmp_path):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
@@ -1426,6 +1445,7 @@ def test_cmd_inject_compact_makes_no_network_call(repo, tmp_path, monkeypatch):
     monkeypatch.setattr(mind, "cmd_proposals", lambda c: pytest.fail("cmd_proposals called on compact"))
     out = mind.cmd_inject(cfg, "compact", tmp_path)
     assert out.startswith(mind.PROTOCOL.format(home=cfg.home))
+    assert "open proposal" not in out
 
 
 def test_cmd_inject_offline_line(repo, tmp_path, monkeypatch):
@@ -1617,7 +1637,7 @@ class FakeGh:
         return subprocess.CompletedProcess(args, 0, "", "")
 
 
-def test_cmd_propose_branch_commits_pr_and_returns_to_main(repo, tmp_path, monkeypatch):
+def test_cmd_propose_branch_commits_pr_and_leaves_main_untouched(repo, tmp_path, monkeypatch):
     cfg, bare, _ = repo
     mind.cmd_init(cfg)
     fake = FakeGh(); monkeypatch.setattr(mind, "_gh", fake)
@@ -1728,7 +1748,7 @@ def test_cmd_propose_supersedes_flips_old_note_in_branch(repo, tmp_path, monkeyp
     d.write_text("---\ntitle: New rule\ntype: preference\nstage: review\nstrength: should\nsupersedes: PREF-REV-001\n---\nnew\n")
     mind.cmd_propose(cfg, [d], "revise", "global", None, None, tmp_path)
     shown = _git(["show", "propose/2026-09-12-revise:global/notes/PREF-REV-001-old-rule.md"], bare).stdout
-    assert "status: superseded" in shown
+    assert mind.parse_frontmatter(shown)[0]["status"] == "superseded"
 
 
 def test_cmd_propose_raises_when_supersedes_target_is_missing(repo, tmp_path, monkeypatch):
@@ -2025,6 +2045,38 @@ def test_cmd_propose_starts_from_fresh_origin_main_not_stale_local(repo, tmp_pat
     assert log == ["mind: propose PRIN-TEST-002 Tests must assert concrete values"]
 
 
+def test_cmd_propose_starts_from_head_when_no_upstream_and_no_propose_branch(tmp_path, monkeypatch):
+    """Task 2 Boundary: a brand-new data repo (main never pushed, so no
+    upstream tracking branch exists yet) and no propose/* branch anywhere
+    must still succeed, starting the worktree from HEAD rather than a
+    nonexistent origin/main."""
+    bare = tmp_path / "remote.git"
+    _git(["init", "--bare", "-q", "--initial-branch=main", str(bare)], tmp_path)
+    home = tmp_path / "home"
+    env = {"MIND_REPO": str(bare), "MIND_HOME": str(home)}
+    cfg = mind.Config.from_env(env, tmp_path)
+    assert mind.ensure_checkout(cfg) is None
+    (cfg.home / "schema.md").write_text("# schema\n")
+    mind.commit_all(cfg, "mind: seed")   # local-only commit, never pushed
+    assert not mind._has_upstream(cfg)
+
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    captured = {}
+    real_git = mind.git
+
+    def spy(c, args, cwd, timeout):
+        if args[:2] == ["worktree", "add"]:
+            captured["args"] = args
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", spy)
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert out == "mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+    assert captured["args"][-1] == "HEAD"
+
+
 def test_cmd_propose_avoids_id_claimed_by_sibling_unmerged_proposal_branch(repo, tmp_path, monkeypatch):
     """M1: two proposals from different topics on the same day, both starting
     fresh from origin/main (neither merged yet), must never assign the same
@@ -2046,16 +2098,32 @@ def test_cmd_propose_avoids_id_claimed_by_sibling_unmerged_proposal_branch(repo,
 
 
 def test_cmd_propose_unmerged_note_invisible_to_ask_on_main(repo, tmp_path, monkeypatch):
-    """Cross-layer: a proposed note must never be visible to ask on the
-    shared checkout before the proposal branch is merged."""
+    """Cross-layer: a proposed note -- including one with a duplicate-
+    looking title or a `supersedes` target -- must never surface through
+    `ask` or `lint` on the shared checkout before the proposal branch is
+    merged (test-review Blockers 1 and 2)."""
     cfg, _, _ = repo
     mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Tests must assert concrete values", "existing note, duplicate title target")
+    _add(cfg, tmp_path, "Old rule", "still accepted until the propose branch merges")
     monkeypatch.setattr(mind, "_gh", FakeGh())
     monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
-    d = tmp_path / "a.md"; d.write_text(DRAFT)
-    mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
-    assert mind.cmd_ask(cfg, ["assert", "concrete"], False, None, False, tmp_path) == \
-        "mind: no note matches 'assert concrete'"
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)   # duplicate title of the note added above
+    d2 = tmp_path / "b.md"
+    d2.write_text("---\ntitle: New rule\ntype: preference\nstage: review\nstrength: should\n"
+                  "supersedes: PREF-REV-002\n---\nnew\n")
+    mind.cmd_propose(cfg, [d1, d2], "x", "global", None, None, tmp_path)
+    # "weak"/"hide" are unique to DRAFT's own body (never in the duplicate-
+    # titled note's body, which shares only the title): a hit here would mean
+    # the unmerged note leaked, not the legitimate pre-existing duplicate.
+    assert mind.cmd_ask(cfg, ["weak", "hide"], False, None, False, tmp_path) == \
+        "mind: no note matches 'weak hide'"
+    lint_out = mind.cmd_lint(cfg, 180)
+    assert "duplicate:" not in lint_out
+    assert "unsuperseded:" not in lint_out
+    assert "PRIN-TEST-001" not in lint_out
+    old = mind._find_note(cfg, "PREF-REV-002")
+    assert old.status == "accepted"
 
 
 def test_cmd_propose_note_appears_after_branch_is_merged(repo, tmp_path, monkeypatch):
@@ -2195,6 +2263,22 @@ def test_capture_defaults_cwd_when_payload_omits_it(repo, tmp_path):
     assert row["cwd"] == str(tmp_path)
 
 
+def test_capture_resolves_project_from_payload_cwd_not_the_session_cwd(repo, tmp_path):
+    """M7: two prompts captured in the same session, each naming a
+    different project's directory in the payload's own "cwd" field, must
+    each get their own project slug -- independent of the subprocess's own
+    (session) working directory, which is the same for both calls here."""
+    cfg, _, _ = repo
+    proj_a = tmp_path / "proj-a"; proj_a.mkdir()
+    proj_b = tmp_path / "proj-b"; proj_b.mkdir()
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    _capture(env, {"session_id": "s", "prompt": "a prompt captured from project a", "cwd": str(proj_a)}, tmp_path)
+    _capture(env, {"session_id": "s", "prompt": "a prompt captured from project b", "cwd": str(proj_b)}, tmp_path)
+    rows = [json.loads(l) for l in (cfg.home.parent / "pending.jsonl").read_text().splitlines()]
+    assert rows[0]["project"] == "proj-a" and rows[0]["cwd"] == str(proj_a)
+    assert rows[1]["project"] == "proj-b" and rows[1]["cwd"] == str(proj_b)
+
+
 def test_capture_preserves_non_ascii_and_emoji_unescaped(repo, tmp_path):
     """The written line must carry literal UTF-8 bytes (ensure_ascii=False),
     not \\uXXXX escapes, and round-trip exactly through json.loads."""
@@ -2308,6 +2392,17 @@ def test_lint_duplicate_id_row_between_mismatch_and_dangling(repo):
     assert (lines.index("mismatch: global/notes/PREF-REV-005-z.md id=PREF-REV-006")
             < lines.index("duplicate id: global/notes/PREF-REV-001-a.md and global/notes/PREF-REV-001-b.md")
             < lines.index("dangling: PREF-REV-004 supersedes PREF-REV-999"))
+
+
+def test_lint_reports_dangling_refers(repo):
+    """M7 / spec section 12: the dangling row must also fire for a
+    precedence note's own `refers` field, not just `supersedes` -- the
+    `_raw_note` in test_lint_rows only ever exercises the `supersedes` arm."""
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    _raw_note(cfg, "PREC-REV-001-x.md", id="PREC-REV-001", title="X", type="precedence",
+               refers=["PREF-REV-999"])
+    out = mind.cmd_lint(cfg, 180)
+    assert "dangling: PREC-REV-001 refers to PREF-REV-999\n" in out
 
 
 def test_lint_reports_no_affirmed_date_for_null_affirmed(repo):
@@ -2439,17 +2534,10 @@ def test_inject_proposals_capped_at_five_with_more_line(repo, tmp_path, monkeypa
     assert "+2 more, run mind.py proposals\n" in out
 
 
-def test_inject_compact_without_proposals_cache_makes_no_call_and_prints_nothing(repo, tmp_path, monkeypatch):
-    cfg, _, _ = repo
-    mind.cmd_init(cfg)
-    monkeypatch.setattr(mind, "cmd_proposals", lambda c: pytest.fail("cmd_proposals called on compact"))
-    out = mind.cmd_inject(cfg, "compact", tmp_path)
-    assert "open proposal" not in out
-
-
 def test_doctor_lines(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
+    _git(["config", "user.email", "doctor@example.test"], cfg.home)
     cfg = dataclasses.replace(cfg, repo="https://x-access-token:sekrit@example.test/o/r.git", token="sekrit")
     monkeypatch.setattr(mind, "_gh", lambda c, a, w, timeout=20: subprocess.CompletedProcess(a, 0, "gh version 2.0.0\n", "Logged in"))
     monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
@@ -2458,7 +2546,7 @@ def test_doctor_lines(repo, tmp_path, monkeypatch):
     assert out[1] == "checkout: ok"
     assert out[2] == "upstream: main tracks origin/main"
     assert out[3] == "remote: reachable (12 ms)"
-    assert out[4].startswith("identity: ")
+    assert out[4] == "identity: doctor@example.test"
     assert out[5] == "gh: 2.0.0 authenticated"
     assert out[6] == "pending: 0 lines, 0 unprocessed, watermark none"
     assert out[7] == "settings: auto_answer=true escalate=false"
@@ -2505,6 +2593,30 @@ def test_doctor_missing_checkout_never_clones(tmp_path, monkeypatch):
     assert not cfg.home.exists()
     assert out[1] == "checkout: missing"
     assert out[8] == "notes: 0 accepted, 0 drafts, 0 malformed, 0 projects"
+
+
+def test_doctor_reports_broken_not_a_git_dir(tmp_path, monkeypatch):
+    """M7 / Plan Task 7 pinned test: a `.git` present but structurally empty
+    (a clone the timeout killed mid-transfer) must read as broken, distinct
+    from `missing`."""
+    home = tmp_path / "h"
+    (home / ".git").mkdir(parents=True)
+    cfg = mind.Config.from_env({"MIND_REPO": "/irrelevant", "MIND_HOME": str(home)}, tmp_path)
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    out = mind.cmd_doctor(cfg).splitlines()
+    assert out[1] == "checkout: broken (not a git dir)"
+
+
+def test_doctor_reports_broken_no_head_for_uncommitted_init(tmp_path, monkeypatch):
+    """M7: a structurally valid but never-committed-to repo (`git init` with
+    zero commits, an unborn HEAD) is the sibling broken state to `not a git
+    dir` -- `_is_valid_git_dir` passes, `_has_head` does not."""
+    home = tmp_path / "h"
+    _git(["init", "-q", "--initial-branch=main", str(home)], tmp_path)
+    cfg = mind.Config.from_env({"MIND_REPO": "/irrelevant", "MIND_HOME": str(home)}, tmp_path)
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    out = mind.cmd_doctor(cfg).splitlines()
+    assert out[1] == "checkout: broken (no HEAD)"
 
 
 def test_doctor_without_mind_repo_reports_unset_and_continues(tmp_path, monkeypatch, capsys):

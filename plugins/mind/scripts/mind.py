@@ -1486,6 +1486,17 @@ def _draft_count(cfg: Config) -> int:
     return sum(1 for d in dirs for n in load_notes(d) if n.status == "draft")
 
 
+def _schema_predates_0_2_0(cfg: Config) -> bool:
+    """0.1.0's `init` wrote a schema.md with no `precedence` note type; an
+    upgraded plugin never rewrites an existing data repo's copy (init only
+    runs once), so the owner needs a nudge to re-copy templates/schema.md
+    by hand or `refers`/`precedence` notes never make sense to them."""
+    path = cfg.home / "schema.md"
+    if not path.is_file():
+        return False
+    return "precedence" not in path.read_text(encoding="utf-8").lower()
+
+
 def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
     out = []
     if event in ("startup", "resume"):
@@ -1525,6 +1536,8 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
     malformed = _malformed_count(cfg)
     if malformed:
         out.append(f"\n{malformed} malformed notes skipped, see {cfg.home}\n")
+    if _schema_predates_0_2_0(cfg):
+        out.append("mind: schema.md predates 0.2.0, re-copy templates/schema.md\n")
     cache = _proposals_cache(cfg)
     if event in ("startup", "resume"):
         try:
