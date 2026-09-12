@@ -975,6 +975,78 @@ def cmd_retire(cfg: Config, note_id: str) -> str:
     return f"mind: retired {note_id}, " + (msg or "pushed")
 
 
+def _all_note_files(cfg: Config) -> list[tuple[str, Path]]:
+    out = [("", p) for p in sorted(global_notes_dir(cfg).glob("*.md"))] if global_notes_dir(cfg).is_dir() else []
+    for slug in list_projects(cfg):
+        out += [(slug + "/", p) for p in sorted(project_notes_dir(cfg, slug).glob("*.md"))]
+    return out
+
+
+def cmd_lint(cfg: Config, days: int) -> str:
+    # Two passes, not one: every malformed row must precede every mismatch
+    # row (file order within each group), and a single interleaved pass over
+    # _all_note_files (sorted by path) would instead interleave them by file
+    # order across both categories -- wrong whenever a mismatch's file sorts
+    # before a malformed one's, as the plan's own pinned test does (005
+    # mismatch, 007 malformed).
+    rows: list[str] = []
+    wellformed: list[tuple[str, Path, dict, str]] = []
+    for prefix, path in _all_note_files(cfg):
+        meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        rel = path.relative_to(cfg.home).as_posix()
+        errs = validate_meta(meta)
+        if errs or not _NOTE_ID_RE.fullmatch(meta.get("id") or ""):
+            rows.append(f"malformed: {rel}: " + ("; ".join(errs) or "bad id"))
+            continue
+        wellformed.append((prefix, path, meta, body))
+    notes: list[tuple[str, Note]] = []
+    for prefix, path, meta, body in wellformed:
+        rel = path.relative_to(cfg.home).as_posix()
+        if not path.name.startswith(meta["id"] + "-"):
+            rows.append(f"mismatch: {rel} id={meta['id']}")
+        notes.append((prefix, Note(path, meta, body)))
+    ids = {p + n.id: n for p, n in notes}
+    for p, n in notes:
+        sup = n.meta.get("supersedes")
+        if sup and (p + sup) not in ids and sup not in ids:
+            rows.append(f"dangling: {p}{n.id} supersedes {sup}")
+        for ref in n.meta.get("refers") or []:
+            if (p + ref) not in ids and ref not in ids:
+                rows.append(f"dangling: {p}{n.id} refers to {ref}")
+    for p, n in notes:
+        sup = n.meta.get("supersedes")
+        old = ids.get(p + (sup or "")) or ids.get(sup or "")
+        if old is not None and old.status == "accepted":
+            rows.append(f"unsuperseded: {p}{old.id} (by {p}{n.id})")
+    seen: dict[tuple[str, str], str] = {}
+    for p, n in notes:
+        if n.status != "accepted":
+            continue
+        key = (p, re.sub(r"[^a-z0-9]+", " ", n.title.lower()).strip())
+        if key in seen:
+            rows.append(f"duplicate: {p}{seen[key]} and {p}{n.id}")
+        else:
+            seen[key] = n.id
+    for slug in list_projects(cfg):
+        _, body = load_project(cfg, slug)
+        if body.strip() == STUB_PROJECT_BODY.strip():
+            rows.append(f"stub: {slug}")
+    for p, n in notes:
+        if n.status == "accepted":
+            age = _age_days(str(n.meta.get("affirmed") or ""))
+            if age > days:
+                rows.append(f"stale: {p}{n.id} ({age} days)")
+    global_notes = [n for p, n in notes if p == ""]
+    accepted = [n for n in global_notes if n.status == "accepted"]
+    projects_idx = build_projects_index(cfg)
+    rendered, _ = _fit(global_notes, "Global", None, "", projects_idx)
+    kept = rendered.count("\n- ")
+    if kept < len(accepted):
+        rows.append(f"budget: {kept} of {len(accepted)} global rows inject")
+    tail = "mind: lint clean\n" if not rows else f"mind: lint found {len(rows)} issues\n"
+    return "".join(r + "\n" for r in rows) + tail
+
+
 def _ask_row(prefix: str, note: "Note", drafts: bool, tag: str = "") -> str:
     line = f"{tag}{prefix}{note.id} | {note.title} | {note.meta.get('scope', 'global')} | {note.strength}"
     if drafts:
@@ -1163,6 +1235,8 @@ def build_parser() -> argparse.ArgumentParser:
     af.add_argument("note_id")
     af.add_argument("--strength", choices=STRENGTHS)
     sub.add_parser("retire").add_argument("note_id")
+    li = sub.add_parser("lint")
+    li.add_argument("--days", type=int, default=180)
     return p
 
 
@@ -1256,6 +1330,8 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
             msg = cmd_affirm(cfg, args.note_id, args.strength)
         elif args.cmd == "retire":
             msg = cmd_retire(cfg, args.note_id)
+        elif args.cmd == "lint":
+            msg = cmd_lint(cfg, args.days)
     except ValidationError as exc:
         print(f"mind: {exc}", file=sys.stderr)
         return 1

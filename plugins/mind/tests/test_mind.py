@@ -1882,3 +1882,82 @@ def test_stale_affirm_retire(repo, tmp_path, monkeypatch):
     assert mind.cmd_retire(cfg, "PREF-REV-002") == "mind: retired PREF-REV-002, pushed"
     assert mind.cmd_stale(cfg, 90, False, tmp_path) == "mind: nothing stale"
     assert _git(["log", "--format=%s", "main", "-2"], bare).stdout.splitlines() == ["mind: retire PREF-REV-002", "mind: affirm PREF-REV-001"]
+
+
+def _raw_note(cfg, name, **over):
+    meta = {"id": "PREF-REV-001", "title": "T", "type": "preference", "stage": "review", "scope": "global",
+            "strength": "should", "status": "accepted", "affirmed": "2026-09-01", "supersedes": None, "source": "t"}
+    meta.update(over)
+    p = mind.global_notes_dir(cfg) / name
+    p.write_text(mind.render_frontmatter(meta, "body\n"))
+    return p
+
+
+def test_lint_clean(repo, tmp_path):
+    cfg, _, _ = repo; mind.cmd_init(cfg); _add(cfg, tmp_path, "Fine", "f")
+    assert mind.cmd_lint(cfg, 180) == "mind: lint clean\n"
+
+
+def test_lint_rows(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    _raw_note(cfg, "PREF-REV-001-t.md")
+    _raw_note(cfg, "PREF-REV-002-t.md", id="PREF-REV-002", title="T")            # duplicate title
+    _raw_note(cfg, "PREF-REV-003-x.md", id="PREF-REV-003", title="X", supersedes="PREF-REV-001")   # 001 still accepted
+    _raw_note(cfg, "PREF-REV-004-y.md", id="PREF-REV-004", title="Y", supersedes="PREF-REV-999")   # dangling
+    _raw_note(cfg, "PREF-REV-005-z.md", id="PREF-REV-006", title="Z")            # id/filename mismatch
+    _raw_note(cfg, "PREF-REV-007-w.md", id="PREF-REV-007", title="W", stage="wish")   # malformed
+    _raw_note(cfg, "PREF-REV-008-old.md", id="PREF-REV-008", title="Old", affirmed="2025-01-01")
+    mind._ensure_project(cfg, "stubby")
+    out = mind.cmd_lint(cfg, 180)
+    assert out == (
+        "malformed: global/notes/PREF-REV-007-w.md: stage must be one of: identity, product, planning, development, testing, review, release, deployment, monitoring, security\n"
+        "mismatch: global/notes/PREF-REV-005-z.md id=PREF-REV-006\n"
+        "dangling: PREF-REV-004 supersedes PREF-REV-999\n"
+        "unsuperseded: PREF-REV-001 (by PREF-REV-003)\n"
+        "duplicate: PREF-REV-001 and PREF-REV-002\n"
+        "stub: stubby\n"
+        "stale: PREF-REV-008 (619 days)\n"
+        "mind: lint found 7 issues\n"
+    )
+
+
+def test_lint_reports_budget_overflow(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "INDEX_BUDGET", 200)
+    for i in range(8):
+        _add(cfg, tmp_path, f"Rule {i}", f"body {i}")
+    out = mind.cmd_lint(cfg, 180)
+    assert "budget: 4 of 8 global rows inject\n" in out
+
+
+def test_lint_does_not_flag_duplicate_titles_across_scopes(repo, tmp_path):
+    """The dedup key is scoped by prefix ('' vs 'acme/'), so identical
+    normalised titles in different scopes never collide."""
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    mind._ensure_project(cfg, "acme")
+    _raw_note(cfg, "PREF-REV-001-t.md", title="Fine")
+    p = mind.project_notes_dir(cfg, "acme") / "PREF-REV-001-t.md"
+    p.write_text(mind.render_frontmatter(
+        {"id": "PREF-REV-001", "title": "Fine", "type": "preference", "stage": "review",
+         "scope": "project:acme", "strength": "should", "status": "accepted",
+         "affirmed": "2026-09-01", "supersedes": None, "source": "t"}, "body\n"))
+    out = mind.cmd_lint(cfg, 180)
+    assert "duplicate:" not in out
+
+
+def test_lint_malformed_rows_are_global_then_project_order(repo, tmp_path):
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    mind._ensure_project(cfg, "zzz")
+    _raw_note(cfg, "PREF-REV-007-w.md", id="PREF-REV-007", title="W", stage="wish")
+    p = mind.project_notes_dir(cfg, "zzz") / "PREF-REV-008-x.md"
+    p.write_text(mind.render_frontmatter(
+        {"id": "PREF-REV-008", "title": "X", "type": "preference", "stage": "wish",
+         "scope": "project:zzz", "strength": "should", "status": "accepted",
+         "affirmed": "2026-09-01", "supersedes": None, "source": "t"}, "body\n"))
+    out = mind.cmd_lint(cfg, 180)
+    lines = [l for l in out.splitlines() if l.startswith("malformed:")]
+    assert lines == [
+        "malformed: global/notes/PREF-REV-007-w.md: stage must be one of: identity, product, planning, development, testing, review, release, deployment, monitoring, security",
+        "malformed: projects/zzz/notes/PREF-REV-008-x.md: stage must be one of: identity, product, planning, development, testing, review, release, deployment, monitoring, security",
+    ]
