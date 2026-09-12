@@ -513,12 +513,21 @@ def cmd_add(cfg: Config, draft: Path, scope: str, project: str | None, cwd: Path
 
 
 def _find_note(cfg: Config, note_id: str) -> Note | None:
-    dirs = [global_notes_dir(cfg)] + [project_notes_dir(cfg, s) for s in list_projects(cfg)]
-    for d in dirs:
-        for n in load_notes(d):
-            if n.id == note_id:
+    """Resolve `slug/ID` to that project's note. A bare ID searches global
+    only, unless it is absent there and unambiguous across projects."""
+    if "/" in note_id:
+        slug, _, bare_id = note_id.partition("/")
+        for n in load_notes(project_notes_dir(cfg, slug)):
+            if n.id == bare_id:
                 return n
-    return None
+        return None
+    for n in load_notes(global_notes_dir(cfg)):
+        if n.id == note_id:
+            return n
+    matches = [n for slug in list_projects(cfg) for n in load_notes(project_notes_dir(cfg, slug)) if n.id == note_id]
+    if len(matches) > 1:
+        raise ValidationError("ambiguous id, use <slug>/<ID>")
+    return matches[0] if matches else None
 
 
 def cmd_accept(cfg: Config, note_id: str) -> str:

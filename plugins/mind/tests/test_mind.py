@@ -705,6 +705,32 @@ def test_cmd_accept_flips_draft(repo, tmp_path):
         mind.cmd_accept(cfg, "NOPE-X-001")
 
 
+def test_cmd_accept_by_slug_prefixed_id(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    work = tmp_path / "proj-a"
+    work.mkdir()
+    _add(cfg, tmp_path, "Draft one", "d", status="draft", scope="project", cwd=work)
+    assert mind.cmd_accept(cfg, "proj-a/PREF-REV-001") == "mind: accepted proj-a/PREF-REV-001, pushed"
+    meta, _ = mind.parse_frontmatter(next(mind.project_notes_dir(cfg, "proj-a").glob("PREF-REV-001-*.md")).read_text())
+    assert meta["status"] == "accepted"
+
+
+def test_cmd_accept_bare_id_ambiguous_across_projects_raises(repo, tmp_path):
+    """A bare ID (no slug/) only ever searches global; if it is absent there
+    but present in more than one project, it must not silently pick one."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    work_a = tmp_path / "proj-a"
+    work_a.mkdir()
+    work_b = tmp_path / "proj-b"
+    work_b.mkdir()
+    _add(cfg, tmp_path, "Draft in a", "d", status="draft", scope="project", cwd=work_a)
+    _add(cfg, tmp_path, "Draft in b", "d", status="draft", scope="project", cwd=work_b)
+    with pytest.raises(mind.ValidationError, match=r"ambiguous id, use <slug>/<ID>"):
+        mind.cmd_accept(cfg, "PREF-REV-001")
+
+
 def _add(cfg, tmp_path, title, body, stage="review", status="accepted", scope="global", cwd=None):
     d = tmp_path / f"{mind._kebab(title)}.md"
     d.write_text(mind.render_frontmatter({"title": title, "type": "preference", "stage": stage, "strength": "should", "status": status}, body + "\n"))
