@@ -675,6 +675,7 @@ def _find_note(cfg: Config, note_id: str) -> Note | None:
     only, unless it is absent there and unambiguous across projects."""
     if "/" in note_id:
         slug, _, bare_id = note_id.partition("/")
+        _validate_slug(slug)
         for n in load_notes(project_notes_dir(cfg, slug)):
             if n.id == bare_id:
                 return n

@@ -1164,6 +1164,15 @@ def test_cmd_accept_by_slug_prefixed_id(repo, tmp_path):
     assert meta["status"] == "accepted"
 
 
+def test_cmd_accept_rejects_path_traversal_in_slug(repo):
+    """`accept ../../../../etc/notes/PREF-DEV-001` must never read a file
+    outside MIND_HOME by walking the slug up with `..`."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    with pytest.raises(mind.ValidationError, match="invalid project slug"):
+        mind.cmd_accept(cfg, "../../../../etc/notes/PREF-DEV-001")
+
+
 def test_cmd_accept_bare_id_ambiguous_across_projects_raises(repo, tmp_path):
     """A bare ID (no slug/) only ever searches global; if it is absent there
     but present in more than one project, it must not silently pick one."""
