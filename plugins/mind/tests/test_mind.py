@@ -200,3 +200,77 @@ def test_ensure_checkout_reports_failure_for_nonempty_home_without_git(tmp_path)
     cfg = mind.Config.from_env({"MIND_REPO": str(tmp_path / "missing.git"), "MIND_HOME": str(home)}, tmp_path)
     msg = mind.ensure_checkout(cfg)
     assert msg.startswith("mind: clone failed")
+
+
+def _write_project(cfg, slug, aliases=(), stack=("python",), body="Quotes from chat messages. Second sentence."):
+    d = cfg.home / "projects" / slug
+    (d / "notes").mkdir(parents=True, exist_ok=True)
+    meta = {"slug": slug, "name": slug.title(), "repo": f"git@example.com:o/{slug}.git",
+            "stack": list(stack), "aliases": list(aliases), "related": [], "updated": "2026-09-12"}
+    (d / "project.md").write_text(mind.render_frontmatter(meta, body + "\n"))
+    return d
+
+
+def test_resolve_candidate_prefers_env_then_origin_then_dirs(tmp_path, repo):
+    cfg, _, _ = repo
+    work = tmp_path / "Some-Repo"
+    work.mkdir()
+    assert mind.resolve_candidate(cfg, work) == "some-repo"           # cwd basename
+    _git(["init", "-q", str(work)], tmp_path)
+    sub = work / "src"; sub.mkdir()
+    assert mind.resolve_candidate(cfg, sub) == "some-repo"            # git top-level
+    _git(["remote", "add", "origin", "git@example.com:o/Other.git"], work)
+    assert mind.resolve_candidate(cfg, sub) == "other"                # origin
+    forced = dataclasses.replace(cfg, project="Forced-Name")
+    assert mind.resolve_candidate(forced, sub) == "forced-name"       # env, lowercased like the rest
+
+
+def test_match_project_by_slug_and_alias(repo):
+    cfg, _, _ = repo
+    _write_project(cfg, "erp-quotes", aliases=("quotes-old", "/x/quotes"))
+    assert mind.match_project(cfg, "erp-quotes") == "erp-quotes"
+    assert mind.match_project(cfg, "quotes-old") == "erp-quotes"
+    assert mind.match_project(cfg, "nothing") is None
+
+
+def test_next_id_per_scope(repo):
+    cfg, _, _ = repo
+    g = mind.global_notes_dir(cfg); g.mkdir(parents=True)
+    assert mind.next_id(g, "preference", "review") == "PREF-REV-001"
+    (g / "PREF-REV-001-x.md").write_text(mind.render_frontmatter({"id": "PREF-REV-001", "title": "x", "type": "preference", "stage": "review", "strength": "must"}, "x\n"))
+    (g / "PREF-REV-007-y.md").write_text(mind.render_frontmatter({"id": "PREF-REV-007", "title": "y", "type": "preference", "stage": "review", "strength": "must"}, "y\n"))
+    assert mind.next_id(g, "preference", "review") == "PREF-REV-008"
+    assert mind.next_id(g, "gotcha", "deployment") == "GOT-DEPLOY-001"
+    (g / "PREF-REV-abc-z.md").write_text(mind.render_frontmatter({"id": "PREF-REV-abc", "title": "z", "type": "preference", "stage": "review", "strength": "must"}, "z\n"))
+    assert mind.next_id(g, "preference", "review") == "PREF-REV-008"  # hand-edited id is skipped, never crashes
+    p = mind.project_notes_dir(cfg, "erp-quotes"); p.mkdir(parents=True)
+    assert mind.next_id(p, "preference", "review") == "PREF-REV-001"
+
+
+def test_build_index_groups_by_stage_and_skips_drafts():
+    def note(i, stage, strength, status="accepted"):
+        return mind.Note(Path(i), {"id": i, "title": f"T {i}", "stage": stage, "strength": strength, "status": status}, "b\n")
+    text = mind.build_index([note("PREF-REV-001", "review", "must"), note("GOT-DEV-001", "development", "should"),
+                             note("PREF-REV-002", "review", "default", "draft")], "Global")
+    assert text == (
+        "# Global\n\n"
+        "## development\n"
+        "- GOT-DEV-001 | T GOT-DEV-001 | should\n\n"
+        "## review\n"
+        "- PREF-REV-001 | T PREF-REV-001 | must\n"
+    )
+
+
+def test_build_projects_index_and_reindex(repo):
+    cfg, _, _ = repo
+    _write_project(cfg, "erp-quotes")
+    _write_project(cfg, "alpha", stack=("go",), body="Alpha thing.")
+    mind.global_notes_dir(cfg).mkdir(parents=True)
+    mind.reindex(cfg)
+    assert (cfg.home / "projects" / "index.md").read_text() == (
+        "# Projects\n\n"
+        "- alpha | Alpha | go | Alpha thing.\n"
+        "- erp-quotes | Erp-Quotes | python | Quotes from chat messages.\n"
+    )
+    assert (cfg.home / "global" / "index.md").read_text() == "# Global\n"
+    assert (cfg.home / "projects" / "erp-quotes" / "index.md").read_text() == "# erp-quotes\n"

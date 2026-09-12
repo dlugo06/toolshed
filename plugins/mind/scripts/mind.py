@@ -229,6 +229,91 @@ def sync(cfg: Config, pull_only: bool = False) -> str | None:
     return push(cfg)
 
 
+def global_notes_dir(cfg: Config) -> Path:
+    return cfg.home / "global" / "notes"
+
+
+def project_notes_dir(cfg: Config, slug: str) -> Path:
+    return cfg.home / "projects" / slug / "notes"
+
+
+def _slugify(name: str) -> str:
+    return name.lower().removesuffix(".git")
+
+
+def resolve_candidate(cfg: Config, cwd: Path) -> str:
+    if cfg.project:
+        return _slugify(cfg.project)
+    origin = subprocess.run(["git", "remote", "get-url", "origin"], cwd=cwd, capture_output=True, text=True)
+    if origin.returncode == 0 and origin.stdout.strip():
+        return _slugify(origin.stdout.strip().rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1])
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True, text=True)
+    if top.returncode == 0 and top.stdout.strip():
+        return _slugify(Path(top.stdout.strip()).name)
+    return _slugify(cwd.name)
+
+
+def load_project(cfg: Config, slug: str) -> tuple[dict, str]:
+    return parse_frontmatter((cfg.home / "projects" / slug / "project.md").read_text())
+
+
+def list_projects(cfg: Config) -> list[str]:
+    root = cfg.home / "projects"
+    if not root.is_dir():
+        return []
+    return sorted(p.name for p in root.iterdir() if (p / "project.md").is_file())
+
+
+def match_project(cfg: Config, candidate: str) -> str | None:
+    for slug in list_projects(cfg):
+        meta, _ = load_project(cfg, slug)
+        if candidate == slug or candidate in (meta.get("aliases") or []):
+            return slug
+    return None
+
+
+def next_id(notes_dir: Path, note_type: str, stage: str) -> str:
+    prefix = f"{TYPE_CODES[note_type]}-{STAGE_CODES[stage]}-"
+    highest = 0
+    for note in load_notes(notes_dir):
+        if note.id.startswith(prefix) and note.id[len(prefix):].isdigit():
+            highest = max(highest, int(note.id[len(prefix):]))
+    return f"{prefix}{highest + 1:03d}"
+
+
+def build_index(notes: list[Note], heading: str) -> str:
+    accepted = [n for n in notes if n.status == "accepted"]
+    out = [f"# {heading}\n"]
+    for stage in STAGES:
+        rows = [n for n in accepted if n.stage == stage]
+        if not rows:
+            continue
+        out.append(f"\n## {stage}\n")
+        out.extend(f"- {n.id} | {n.title} | {n.strength}\n" for n in sorted(rows, key=lambda n: n.id))
+    return "".join(out)
+
+
+def build_projects_index(cfg: Config) -> str:
+    out = ["# Projects\n"]
+    slugs = list_projects(cfg)
+    if slugs:
+        out.append("\n")
+    for slug in slugs:
+        meta, body = load_project(cfg, slug)
+        first = body.strip().split(". ", 1)[0].rstrip(".") + "." if body.strip() else ""
+        out.append(f"- {slug} | {meta.get('name', slug)} | {', '.join(meta.get('stack') or [])} | {first}\n")
+    return "".join(out)
+
+
+def reindex(cfg: Config) -> None:
+    (cfg.home / "global").mkdir(parents=True, exist_ok=True)
+    (cfg.home / "global" / "index.md").write_text(build_index(load_notes(global_notes_dir(cfg)), "Global"))
+    (cfg.home / "projects").mkdir(exist_ok=True)
+    (cfg.home / "projects" / "index.md").write_text(build_projects_index(cfg))
+    for slug in list_projects(cfg):
+        (cfg.home / "projects" / slug / "index.md").write_text(build_index(load_notes(project_notes_dir(cfg, slug)), slug))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mind.py", add_help=True)
     sub = p.add_subparsers(dest="cmd")
