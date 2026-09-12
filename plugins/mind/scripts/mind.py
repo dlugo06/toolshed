@@ -200,7 +200,7 @@ def _has_configured_identity(cfg: Config) -> bool:
 def git_base_args(cfg: Config) -> list[str]:
     args = ["git"]
     if cfg.token:
-        helper = "!f() { echo username=x-access-token; echo password=$MIND_TOKEN; }; f"
+        helper = '!f() { echo username=x-access-token; echo password="$MIND_TOKEN"; }; f'
         # An empty credential.helper resets any helpers configured earlier
         # (global osxkeychain, gh, etc.) so only ours answers and none of
         # them gets a chance to persist the cloud token to disk.

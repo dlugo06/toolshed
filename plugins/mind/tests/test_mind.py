@@ -966,6 +966,16 @@ def test_git_base_args_resets_credential_helpers_before_custom_one(repo):
     assert reset_idx < custom_idx
 
 
+def test_git_base_args_quotes_mind_token_for_tokens_with_whitespace(repo):
+    """An unquoted $MIND_TOKEN in the credential helper would word-split a
+    token containing whitespace across multiple argv entries."""
+    cfg, _, _ = repo
+    cfg = dataclasses.replace(cfg, token="tok with spaces")
+    args = mind.git_base_args(cfg)
+    helper = next(a for a in args if a.startswith("credential.helper=!f"))
+    assert '"$MIND_TOKEN"' in helper
+
+
 def test_git_base_args_adds_identity_only_when_git_config_has_none(repo):
     """A fresh clone (e.g. a cloud container) has no configured git identity
     at all: git_base_args must supply one so commit_all does not fail with
