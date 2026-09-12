@@ -497,7 +497,7 @@ def cmd_add(cfg: Config, draft: Path, scope: str, project: str | None, cwd: Path
     meta.setdefault("source", f"session {_today()}, {resolve_candidate(cfg, cwd)}")
     meta["scope"] = scope_value
     # Pull first so the ID is assigned against the latest remote state.
-    sync(cfg, pull_only=True)
+    pre_msg = sync(cfg, pull_only=True)
     path = _write_note(cfg, notes_dir, meta, body)
     collision = _find_collision(notes_dir, meta["id"], path)
     if collision is not None:
@@ -525,7 +525,11 @@ def cmd_add(cfg: Config, draft: Path, scope: str, project: str | None, cwd: Path
             msg = push(cfg)
     note_id = parse_frontmatter(path.read_text())[0]["id"]
     scope_label = "global" if scope == "global" else f"project {prefix[:-1]}"
-    result = f"mind: added {prefix}{note_id} ({scope_label}), " + (msg or "pushed")
+    result = f"mind: added {prefix}{note_id} ({scope_label}), "
+    if pre_msg:
+        # The ID above was assigned before this pull's outcome was known.
+        result += f"{pre_msg}; "
+    result += (msg or "pushed")
     if created_stub:
         result += "; project.md is a stub, fill it in"
     return result

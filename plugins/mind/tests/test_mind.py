@@ -742,6 +742,26 @@ def test_cmd_add_renames_on_duplicate_id_from_remote(repo, tmp_path, seed_note):
     assert names == ["PRIN-TEST-001-other.md", "PRIN-TEST-002-tests-must-assert-concrete-values.md"]
 
 
+def test_cmd_add_prefixes_result_with_pre_write_sync_message(repo, tmp_path, monkeypatch):
+    """When the pre-write pull fails (offline, or a hand-resolve conflict),
+    the ID was still assigned against stale local state; the owner must be
+    told, not left to discover it only later."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    real_sync = mind.sync
+
+    def fake_sync(c, pull_only=False):
+        if pull_only:
+            return "mind: offline, using cached copy from 2026-09-12"
+        return real_sync(c, pull_only)
+
+    monkeypatch.setattr(mind, "sync", fake_sync)
+    draft = tmp_path / "d.md"
+    draft.write_text(DRAFT)
+    out = mind.cmd_add(cfg, draft, "global", None, tmp_path)
+    assert out == "mind: added PRIN-TEST-001 (global), mind: offline, using cached copy from 2026-09-12; pushed"
+
+
 def test_cmd_add_two_checkouts_different_ids_same_stage_both_land_on_remote(repo, tmp_path):
     """Two independent checkouts add different-ID notes to the same stage at
     once. Nothing collides (different type codes), so both notes must reach
