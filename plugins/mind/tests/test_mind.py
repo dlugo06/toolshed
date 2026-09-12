@@ -2421,6 +2421,24 @@ def test_inject_mode_proposals_and_pending_lines(repo, tmp_path, monkeypatch):
     assert "1 open proposal: propose/2026-09-12-x https://example.test/pr/9" in out2   # served from the cache on compact
 
 
+def test_inject_proposals_capped_at_five_with_more_line(repo, tmp_path, monkeypatch):
+    """M4: the proposals block in inject is unbounded outside INDEX_BUDGET;
+    a month of unmerged daily digests would otherwise grow it forever. Cap
+    at 5 total rows (the count line's own proposal counts as one), then a
+    '+N more, run mind.py proposals' line."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    rows = [(f"propose/2026-09-{i:02d}-x", f"https://example.test/pr/{i}") for i in range(1, 8)]
+    monkeypatch.setattr(mind, "cmd_proposals", lambda c: rows)
+    out = mind.cmd_inject(cfg, "startup", tmp_path)
+    assert "7 open proposals: propose/2026-09-01-x https://example.test/pr/1\n" in out
+    for b, u in rows[1:5]:
+        assert f"{b} {u}\n" in out
+    assert "propose/2026-09-06-x" not in out
+    assert "propose/2026-09-07-x" not in out
+    assert "+2 more, run mind.py proposals\n" in out
+
+
 def test_inject_compact_without_proposals_cache_makes_no_call_and_prints_nothing(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)

@@ -1548,7 +1548,15 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
         noun = "proposal" if n == 1 else "proposals"
         first_b, first_u = rows[0]
         out.append(f"\n{n} open {noun}: {first_b} {first_u}\n")
-        out.extend(f"{b} {u}\n" for b, u in rows[1:])
+        # At most 5 rows total (the one above counts as one): unbounded
+        # growth here is outside INDEX_BUDGET, and a month of unmerged
+        # daily digests would otherwise cost ~2.5 KB of context every
+        # session start.
+        shown = rows[1:5]
+        out.extend(f"{b} {u}\n" for b, u in shown)
+        remaining = n - 1 - len(shown)
+        if remaining > 0:
+            out.append(f"+{remaining} more, run mind.py proposals\n")
     pending = read_pending(cfg, None, 10**6)
     if len(pending) >= 20:
         wm_path = _watermark_file(cfg)
