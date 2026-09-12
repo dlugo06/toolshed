@@ -7,6 +7,7 @@ import dataclasses
 import datetime as dt
 import os
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -167,8 +168,24 @@ def git(cfg: Config, args: list[str], cwd: Path, timeout: float) -> subprocess.C
     if cfg.token:
         env["MIND_TOKEN"] = cfg.token
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
-    return subprocess.run(git_base_args(cfg) + args, cwd=cwd, env=env, capture_output=True,
-                          text=True, timeout=timeout)
+    # An unknown host key or passphrase prompt would otherwise hang ssh (and
+    # so this whole call) past the timeout below.
+    env.setdefault("GIT_SSH_COMMAND", "ssh -oBatchMode=yes -oConnectTimeout=5")
+    full_args = git_base_args(cfg) + args
+    proc = subprocess.Popen(full_args, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # subprocess.run's default kill() only signals the direct child; an
+        # orphaned ssh grandchild would keep the stdout/stderr pipes open
+        # and communicate() would block on it well past this timeout. Kill
+        # the whole process group instead.
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        raise
+    return subprocess.CompletedProcess(full_args, proc.returncode, stdout, stderr)
 
 
 def _head_date(cfg: Config) -> str:

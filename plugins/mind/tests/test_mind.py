@@ -3,6 +3,7 @@ import dataclasses
 import datetime as dt
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -211,6 +212,60 @@ def test_sync_pushes_local_commits_and_retries_once(repo):
     assert mind.sync(cfg) is None
     log = _git(["log", "--format=%s", "main"], bare).stdout.splitlines()
     assert log == ["mind: add a", "b", "init"]
+
+
+def test_git_sets_default_ssh_command_without_overriding_existing(repo, monkeypatch):
+    cfg, _, _ = repo
+    captured = {}
+    real_popen = subprocess.Popen
+
+    def spy(args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return real_popen(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    mind.git(cfg, ["rev-parse", "--show-toplevel"], cfg.home, 5)
+    assert captured["env"]["GIT_SSH_COMMAND"] == "ssh -oBatchMode=yes -oConnectTimeout=5"
+
+    custom_cfg = dataclasses.replace(cfg, env=dict(os.environ, GIT_SSH_COMMAND="ssh -custom"))
+    mind.git(custom_cfg, ["rev-parse", "--show-toplevel"], custom_cfg.home, 5)
+    assert captured["env"]["GIT_SSH_COMMAND"] == "ssh -custom"
+
+
+def test_git_uses_popen_with_closed_stdin_and_new_session(repo, monkeypatch):
+    """git() must never wait on stdin (which would hang on an unknown ssh
+    host-key prompt) and must run in its own process group, so a timeout can
+    reach an orphaned ssh grandchild too, not just the direct git child."""
+    cfg, _, _ = repo
+    captured = {}
+    real_popen = subprocess.Popen
+
+    def spy(args, **kwargs):
+        captured.update(kwargs)
+        return real_popen(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    mind.git(cfg, ["rev-parse", "--show-toplevel"], cfg.home, 5)
+    assert captured.get("stdin") == subprocess.DEVNULL
+    assert captured.get("start_new_session") is True
+
+
+def test_git_kills_process_group_with_sigkill_on_timeout(repo, monkeypatch):
+    cfg, _, _ = repo
+    killed = {}
+    real_killpg = os.killpg
+
+    def spy_killpg(pgid, sig):
+        killed["pgid"] = pgid
+        killed["sig"] = sig
+        return real_killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", spy_killpg)
+    monkeypatch.setattr(mind, "git_base_args", lambda c: ["sleep"])
+    with pytest.raises(subprocess.TimeoutExpired):
+        mind.git(cfg, ["2"], cfg.home, 0.1)
+    assert killed.get("sig") == signal.SIGKILL
+    assert killed.get("pgid") is not None
 
 
 def test_sync_retry_pull_timeout_returns_push_failed_line(repo, monkeypatch):
