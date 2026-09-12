@@ -1398,6 +1398,28 @@ def test_cmd_inject_offline_line(repo, tmp_path, monkeypatch):
     assert out.startswith("mind: offline, using cached copy from 2026-09-12\n")
 
 
+def test_cmd_inject_survives_proposals_fetch_timeout(repo, tmp_path, monkeypatch):
+    """A hung fetch inside cmd_proposals must not discard the whole session-
+    start payload: it degrades to no proposals line (and an empty cache),
+    not a crash that drops the protocol and every index already built."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Global rule", "g")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:1] == ["fetch"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    out = mind.cmd_inject(cfg, "startup", tmp_path)
+    assert "PREF-REV-001 | Global rule | should" in out
+    assert "open proposal" not in out
+    cache = mind._proposals_cache(cfg)
+    assert json.loads(cache.read_text()) == []
+
+
 def test_cmd_inject_truncates_global_first(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)

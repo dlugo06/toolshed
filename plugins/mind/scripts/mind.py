@@ -839,7 +839,12 @@ def cmd_proposals(cfg: Config) -> list[tuple[str, str]]:
     """Remote proposal branches with their PR URL, plus local propose/* branches
     that never reached the remote (a failed push), marked "(unpushed)" so a
     stuck proposal is visible to the owner."""
-    git(cfg, ["fetch", "-q", "--prune"], cfg.home, GIT_TIMEOUTS["pull"])
+    try:
+        git(cfg, ["fetch", "-q", "--prune"], cfg.home, GIT_TIMEOUTS["pull"])
+    except subprocess.TimeoutExpired:
+        # Offline: fall through and report whatever the last fetch left in
+        # the local refs, same "cached copy" contract as sync()/pull().
+        pass
     proc = git(cfg, ["branch", "-r", "--list", "origin/propose/*", "--format=%(refname:short)"], cfg.home, 5)
     branches = [b.removeprefix("origin/") for b in proc.stdout.split() if b]
     local = git(cfg, ["branch", "--list", "propose/*", "--format=%(refname:short)"], cfg.home, 5)
@@ -1328,7 +1333,13 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
         out.append(f"\n{malformed} malformed notes skipped, see {cfg.home}\n")
     cache = _proposals_cache(cfg)
     if event in ("startup", "resume"):
-        rows = cmd_proposals(cfg)
+        try:
+            rows = cmd_proposals(cfg)
+        except Exception:
+            # inject must never lose the payload already built above over a
+            # proposals-listing failure (a hung git or gh call): degrade to
+            # no proposals line, same as having none.
+            rows = []
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps(rows), encoding="utf-8")
     else:
