@@ -157,7 +157,7 @@ def test_parse_frontmatter_missing_returns_empty_meta():
 def test_validate_meta_reports_every_problem():
     errs = mind.validate_meta({"title": "x", "type": "wish", "stage": "review"})
     assert errs == [
-        "type must be one of: principle, preference, decision, procedure, gotcha, reference",
+        "type must be one of: principle, preference, decision, procedure, gotcha, reference, precedence",
         "missing required field: strength",
     ]
     assert mind.validate_meta({"title": "x", "type": "gotcha", "stage": "deployment", "strength": "should"}) == []
@@ -1257,6 +1257,60 @@ def test_cmd_ask_drafts_lists_only_drafts(repo, tmp_path):
     _add(cfg, tmp_path, "Accepted one", "a")
     _add(cfg, tmp_path, "Draft one", "d", status="draft")
     assert mind.cmd_ask(cfg, [], False, None, True, tmp_path) == "PREF-REV-002 | Draft one | global | should | draft\n  d\n"
+
+
+def test_precedence_type_and_refers_field(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    d = tmp_path / "p.md"
+    d.write_text("---\ntitle: When PREF-REV-001 conflicts with PREF-REV-002, the first wins on public repos\n"
+                 "type: precedence\nstage: review\nstrength: should\nrefers: [PREF-REV-001, PREF-REV-002]\n---\n"
+                 "When PREF-REV-001 conflicts with PREF-REV-002, PREF-REV-001 wins when the repo is public.\n")
+    out = mind.cmd_add(cfg, d, "global", None, tmp_path)
+    assert out == "mind: added PREC-REV-001 (global), pushed"
+    meta, _ = mind.parse_frontmatter(next(mind.global_notes_dir(cfg).glob("PREC-REV-001-*.md")).read_text())
+    assert meta["refers"] == ["PREF-REV-001", "PREF-REV-002"]
+
+
+def test_ask_precedence_first_and_limit(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    for i in range(3):
+        _add(cfg, tmp_path, f"Threads rule {i}", "threads body")
+    d = tmp_path / "p.md"
+    d.write_text("---\ntitle: Threads precedence\ntype: precedence\nstage: review\nstrength: should\n"
+                 "refers: [PREF-REV-001, PREF-REV-002]\n---\nWhen PREF-REV-001 conflicts with PREF-REV-002, PREF-REV-001 wins on threads.\n")
+    mind.cmd_add(cfg, d, "global", None, tmp_path)
+    out = mind.cmd_ask(cfg, ["threads"], False, None, False, tmp_path, limit=2)
+    assert out.startswith("[precedence] PREC-REV-001 | Threads precedence | global | should\n")
+    assert out.count("\n  ") == 3   # precedence row + 2 limited rows
+    out2 = mind.cmd_ask(cfg, ["threads"], False, None, False, tmp_path, stage="testing")
+    assert out2 == "mind: no note matches 'threads'"
+
+
+def test_ask_precedence_not_promoted_when_hits_do_not_share_a_stage(repo, tmp_path):
+    """Two matching notes in different stages must not trigger the
+    precedence promotion, even when a precedence note's `refers` names both
+    of them: the plan's promotion gate is 'two or more hits share a stage',
+    checked before refers is ever consulted."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    d1 = tmp_path / "dev.md"
+    d1.write_text(mind.render_frontmatter(
+        {"title": "Dev threads rule", "type": "preference", "stage": "development", "strength": "should"},
+        "threads body.\n"))
+    mind.cmd_add(cfg, d1, "global", None, tmp_path)
+    d2 = tmp_path / "rev.md"
+    d2.write_text(mind.render_frontmatter(
+        {"title": "Review threads rule", "type": "preference", "stage": "review", "strength": "should"},
+        "threads body.\n"))
+    mind.cmd_add(cfg, d2, "global", None, tmp_path)
+    d3 = tmp_path / "prec.md"
+    d3.write_text("---\ntitle: Dev vs review precedence\ntype: precedence\nstage: review\nstrength: should\n"
+                  "refers: [PREF-DEV-001, PREF-REV-001]\n---\nWhen PREF-DEV-001 conflicts with PREF-REV-001, PREF-DEV-001 wins.\n")
+    mind.cmd_add(cfg, d3, "global", None, tmp_path)
+    out = mind.cmd_ask(cfg, ["threads"], False, None, False, tmp_path)
+    assert "[precedence]" not in out
 
 
 def test_cmd_inject_prints_sections_in_order(repo, tmp_path, monkeypatch):

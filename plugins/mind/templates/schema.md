@@ -4,7 +4,7 @@
 ---
 id: PREF-REV-003
 title: Never auto-approve during process-review
-type: preference      # principle | preference | decision | procedure | gotcha | reference
+type: preference      # principle | preference | decision | procedure | gotcha | reference | precedence
 stage: review         # identity | product | planning | development | testing | review | release | deployment | monitoring | security
 scope: global         # global | project:<slug>
 strength: must        # must | should | default | optional
@@ -12,6 +12,7 @@ status: accepted      # draft | accepted | superseded | deprecated
 affirmed: 2026-09-11  # last date the owner confirmed it
 supersedes: null      # ID of the note this replaces, if any
 source: CLAUDE.md, acme-api, 2026-09-11   # where the claim came from
+refers: [PREF-REV-001, PREF-REV-002]      # precedence only: the two IDs it rules between
 ---
 One or two sentences stating the claim.
 
@@ -28,6 +29,9 @@ Type semantics:
 - **procedure**: a checklist.
 - **gotcha**: a trap with the evidence that proved it.
 - **reference**: URLs, IDs, dashboards.
+- **precedence**: rules which of two conflicting notes wins. Body convention:
+  "When <ID-A> conflicts with <ID-B>, <ID-A> wins when <condition>." Carries
+  `refers: [ID-A, ID-B]`.
 
 ID scheme: `<TYPE>-<STAGE>-<NNN>`, with type codes PRIN, PREF, DEC, PROC,
 GOT, REF and stage codes ID, PROD, PLAN, DEV, TEST, REV, REL, DEPLOY, MON,

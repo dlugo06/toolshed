@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
+import json
 import os
 import re
 import shutil
@@ -13,22 +14,22 @@ import subprocess
 import sys
 from pathlib import Path
 
-USAGE = "usage: mind.py {inject,add,ask,reindex,accept,sync,init} ..."
+USAGE = "usage: mind.py {inject,add,propose,proposals,ask,pending,stale,affirm,retire,lint,settings,doctor,reindex,accept,sync,init} ..."
 
-TYPES = ["principle", "preference", "decision", "procedure", "gotcha", "reference"]
+TYPES = ["principle", "preference", "decision", "procedure", "gotcha", "reference", "precedence"]
 STAGES = ["identity", "product", "planning", "development", "testing", "review",
           "release", "deployment", "monitoring", "security"]
 STRENGTHS = ["must", "should", "default", "optional"]
 STATUSES = ["draft", "accepted", "superseded", "deprecated"]
-TYPE_CODES = dict(zip(TYPES, ["PRIN", "PREF", "DEC", "PROC", "GOT", "REF"]))
+TYPE_CODES = dict(zip(TYPES, ["PRIN", "PREF", "DEC", "PROC", "GOT", "REF", "PREC"]))
 STAGE_CODES = dict(zip(STAGES, ["ID", "PROD", "PLAN", "DEV", "TEST", "REV",
                                 "REL", "DEPLOY", "MON", "SEC"]))
 REQUIRED = ["title", "type", "stage", "strength"]
-KNOWN = REQUIRED + ["id", "scope", "status", "affirmed", "supersedes", "source"]
+KNOWN = REQUIRED + ["id", "scope", "status", "affirmed", "supersedes", "source", "refers"]
 ENUMS = {"type": TYPES, "stage": STAGES, "strength": STRENGTHS, "status": STATUSES}
 
 
-LIST_FIELDS = {"stack", "aliases", "related"}
+LIST_FIELDS = {"stack", "aliases", "related", "refers"}
 
 
 def _parse_value(key: str, raw: str):
@@ -611,7 +612,10 @@ def _ensure_project(cfg: Config, slug: str) -> bool:
 
 def _write_note(cfg: Config, notes_dir: Path, meta: dict, body: str) -> Path:
     meta["id"] = next_id(notes_dir, meta["type"], meta["stage"])
-    ordered = {k: meta.get(k) for k in ["id", "title", "type", "stage", "scope", "strength", "status", "affirmed", "supersedes", "source"]}
+    fields = ["id", "title", "type", "stage", "scope", "strength", "status", "affirmed", "supersedes", "source"]
+    if "refers" in meta:
+        fields.append("refers")
+    ordered = {k: meta.get(k) for k in fields}
     path = notes_dir / f"{ordered['id']}-{_kebab(ordered['title'])}.md"
     path.write_text(render_frontmatter(ordered, body), encoding="utf-8")
     return path
@@ -732,12 +736,22 @@ def _scoped_notes(cfg: Config, all_projects: bool, project: str | None, cwd: Pat
     return rows
 
 
-def cmd_ask(cfg: Config, terms: list[str], all_projects: bool, project: str | None, drafts: bool, cwd: Path) -> str:
+def _ask_row(prefix: str, note: "Note", drafts: bool, tag: str = "") -> str:
+    line = f"{tag}{prefix}{note.id} | {note.title} | {note.meta.get('scope', 'global')} | {note.strength}"
+    if drafts:
+        line += " | draft"
+    return line + "\n  " + note.first_paragraph + "\n"
+
+
+def cmd_ask(cfg: Config, terms: list[str], all_projects: bool, project: str | None, drafts: bool, cwd: Path,
+            limit: int = 10, stage: str | None = None) -> str:
     wanted = "draft" if drafts else "accepted"
     lowered = [t.lower() for t in terms]
     scored = []
     for prefix, note in _scoped_notes(cfg, all_projects, project, cwd):
         if note.status != wanted:
+            continue
+        if stage is not None and note.stage != stage:
             continue
         hay = (note.title + "\n" + note.body).lower()
         hits = sum(1 for t in lowered if re.search(rf"\b{re.escape(t)}\b", hay))
@@ -745,12 +759,25 @@ def cmd_ask(cfg: Config, terms: list[str], all_projects: bool, project: str | No
             scored.append((-hits, prefix, note.id, prefix, note))
     if not scored:
         return f"mind: no note matches '{' '.join(terms)}'"
-    out = []
-    for _, _, _, prefix, note in sorted(scored, key=lambda r: (r[0], r[1], r[2]))[:10]:
-        line = f"{prefix}{note.id} | {note.title} | {note.meta.get('scope', 'global')} | {note.strength}"
-        if drafts:
-            line += " | draft"
-        out.append(line + "\n  " + note.first_paragraph + "\n")
+    ranked = sorted(scored, key=lambda r: (r[0], r[1], r[2]))
+    precedence = [r for r in ranked if r[4].meta.get("type") == "precedence"]
+    others = [r for r in ranked if r[4].meta.get("type") != "precedence"]
+    stage_counts: dict[str, int] = {}
+    for r in others:
+        stage_counts[r[4].stage] = stage_counts.get(r[4].stage, 0) + 1
+    promote_ok = any(count >= 2 for count in stage_counts.values())
+    hit_ids = {r[2] for r in others}
+    promoted, remaining_precedence = [], []
+    for r in precedence:
+        matched_terms = r[0] < 0
+        refers = r[4].meta.get("refers") or []
+        if promote_ok and (matched_terms or (set(refers) & hit_ids)):
+            promoted.append(r)
+        else:
+            remaining_precedence.append(r)
+    out = [_ask_row(r[3], r[4], drafts, tag="[precedence] ") for r in promoted]
+    rest = sorted(others + remaining_precedence, key=lambda r: (r[0], r[1], r[2]))
+    out += [_ask_row(r[3], r[4], drafts) for r in rest[:limit]]
     return "".join(out)
 
 
@@ -872,6 +899,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--all", action="store_true")
     q.add_argument("--project")
     q.add_argument("--drafts", action="store_true")
+    q.add_argument("--limit", type=int, default=10)
+    q.add_argument("--stage", choices=STAGES)
     sub.add_parser("reindex")
     sub.add_parser("accept").add_argument("note_id")
     sub.add_parser("sync").add_argument("--pull-only", action="store_true")
@@ -930,7 +959,8 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
         elif args.cmd == "accept":
             msg = cmd_accept(cfg, args.note_id)
         elif args.cmd == "ask":
-            msg = cmd_ask(cfg, args.terms, args.all, args.project, args.drafts, cwd)
+            msg = cmd_ask(cfg, args.terms, args.all, args.project, args.drafts, cwd,
+                          limit=args.limit, stage=args.stage)
         elif args.cmd == "reindex":
             reindex(cfg)
             msg = "mind: reindexed"
