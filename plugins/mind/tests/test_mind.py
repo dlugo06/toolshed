@@ -512,10 +512,16 @@ def test_next_id_per_scope(repo):
 
 
 def test_build_index_groups_by_stage_and_skips_drafts():
+    """Only status: accepted notes ever appear in a generated index — draft,
+    superseded, and deprecated must all be excluded (a filter that changed
+    from `== "accepted"` to `!= "draft"` would let the latter two leak in
+    and still pass a test that only tries draft)."""
     def note(i, stage, strength, status="accepted"):
         return mind.Note(Path(i), {"id": i, "title": f"T {i}", "stage": stage, "strength": strength, "status": status}, "b\n")
     text = mind.build_index([note("PREF-REV-001", "review", "must"), note("GOT-DEV-001", "development", "should"),
-                             note("PREF-REV-002", "review", "default", "draft")], "Global")
+                             note("PREF-REV-002", "review", "default", "draft"),
+                             note("PREF-REV-003", "review", "should", "superseded"),
+                             note("PREF-REV-004", "review", "should", "deprecated")], "Global")
     assert text == (
         "# Global\n\n"
         "## development\n"
