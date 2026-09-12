@@ -302,10 +302,13 @@ def test_sync_retry_pull_timeout_returns_push_failed_line(repo, monkeypatch):
 
 
 def test_token_goes_on_command_line_not_disk(repo):
+    """A real git call with a token must neither expose it in argv (visible
+    to `ps` on a shared cloud box) nor leave it written into .git/config."""
     cfg, bare, _ = repo
     cfg = dataclasses.replace(cfg, token="sekrit")
-    args = mind.git_base_args(cfg)
-    assert args[0:2] == ["git", "-c"]
+    mind.git(cfg, ["status"], cfg.home, 5)
+    joined = " ".join(mind.git_base_args(cfg))
+    assert "sekrit" not in joined
     assert "sekrit" not in (cfg.home / ".git" / "config").read_text()
 
 
@@ -327,16 +330,20 @@ def test_sync_rebase_content_conflict_returns_sync_conflict_message(repo):
     assert status == ""
 
 
-def test_ensure_checkout_reports_failure_for_nonempty_home_without_git(tmp_path):
-    """A crashed clone can leave a non-empty directory with no .git/: git
-    clone refuses to clone into it, and ensure_checkout must report the
-    failure rather than raising or leaving the target half-populated."""
-    home = tmp_path / "h"
+def test_ensure_checkout_reports_failure_for_nonempty_home_without_git(repo):
+    """A crashed clone can leave a non-empty directory with no .git/: against
+    a perfectly valid source, git clone still refuses to clone into a
+    non-empty destination, and ensure_checkout must report that failure
+    rather than raising or leaving the target half-populated."""
+    cfg, bare, _ = repo
+    home = cfg.home.parent / "nonempty_home"
     home.mkdir(parents=True)
     (home / "stray.txt").write_text("leftover\n")
-    cfg = mind.Config.from_env({"MIND_REPO": str(tmp_path / "missing.git"), "MIND_HOME": str(home)}, tmp_path)
-    msg = mind.ensure_checkout(cfg)
+    cfg2 = dataclasses.replace(cfg, home=home)
+    msg = mind.ensure_checkout(cfg2)
     assert msg.startswith("mind: clone failed")
+    assert not (home / ".git").exists()
+    assert (home / "stray.txt").is_file()  # left untouched, not half-populated
 
 
 def _write_project(cfg, slug, aliases=(), stack=("python",), body="Quotes from chat messages. Second sentence."):
@@ -801,7 +808,8 @@ def test_cmd_inject_compact_makes_no_network_call(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
     monkeypatch.setattr(mind, "pull", lambda c: pytest.fail("pull called on compact"))
-    mind.cmd_inject(cfg, "compact", tmp_path)
+    out = mind.cmd_inject(cfg, "compact", tmp_path)
+    assert out.startswith(mind.PROTOCOL.format(home=cfg.home))
 
 
 def test_cmd_inject_offline_line(repo, tmp_path, monkeypatch):
