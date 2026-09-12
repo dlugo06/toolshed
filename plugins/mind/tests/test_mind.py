@@ -213,6 +213,39 @@ def test_sync_pushes_local_commits_and_retries_once(repo):
     assert log == ["mind: add a", "b", "init"]
 
 
+def test_sync_retry_pull_timeout_returns_push_failed_line(repo, monkeypatch):
+    """The push-retry pull --rebase must not raise TimeoutExpired uncaught:
+    a slow link there should be treated as a failure, same as everywhere
+    else, and sync() should report the push-failed line rather than crash."""
+    cfg, bare, seed = repo
+    (cfg.home / "a.md").write_text("a\n")
+    mind.commit_all(cfg, "mind: add a")
+
+    calls = {"push": 0, "pull_rebase": 0}
+    real_push = mind.push
+    real_git = mind.git
+
+    def push_then_fail_once(c):
+        calls["push"] += 1
+        if calls["push"] == 1:
+            return "mind: push failed, note is committed locally; it will push on the next remember or session start"
+        return real_push(c)
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:3] == ["pull", "-q", "--rebase"]:
+            calls["pull_rebase"] += 1
+            if calls["pull_rebase"] == 2:  # the retry pull, not the first one
+                raise subprocess.TimeoutExpired(cmd="git pull", timeout=timeout)
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "push", push_then_fail_once)
+    monkeypatch.setattr(mind, "git", fake_git)
+    msg = mind.sync(cfg)
+    assert msg == "mind: push failed, note is committed locally; it will push on the next remember or session start"
+    status = _git(["status", "--porcelain"], cfg.home).stdout
+    assert status == ""  # no leftover rebase state
+
+
 def test_token_goes_on_command_line_not_disk(repo):
     cfg, bare, _ = repo
     cfg = dataclasses.replace(cfg, token="sekrit")

@@ -280,8 +280,11 @@ def sync(cfg: Config, pull_only: bool = False) -> str | None:
     if msg is None:
         return None
     # One retry: the remote may have moved between the pull and the push.
-    proc = git(cfg, ["pull", "-q", "--rebase"], cfg.home, GIT_TIMEOUTS["pull"])
-    if proc.returncode != 0:
+    try:
+        proc = git(cfg, ["pull", "-q", "--rebase"], cfg.home, GIT_TIMEOUTS["pull"])
+    except subprocess.TimeoutExpired:
+        proc = None
+    if proc is None or proc.returncode != 0:
         git(cfg, ["rebase", "--abort"], cfg.home, 5)
         return msg
     return push(cfg)
