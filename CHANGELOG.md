@@ -1,5 +1,13 @@
 # Changelog
 
+## mind 0.1.0 (2026-09-12)
+
+- First built version of `mind`, previously a placeholder. SessionStart hook (`inject`): pulls the private notes repo on `startup`/`resume` (never on `clear`/`compact`), prints the protocol line plus the global index, current project index, and projects index, budgeted to 4,000 characters (global truncated first, projects index never truncated), and the draft count.
+- `remember` and `ask` skills, backed by one stdlib script, `scripts/mind.py`: `init` (write `schema.md`, create the `global/`/`projects/` layout, push), `add` (validate frontmatter, assign a per-scope ID, write the note, reindex, commit, sync, with an ID-collision retry when two machines race), `ask` (ranked term search over accepted or draft notes, global plus current project or `--all`), `reindex`, `accept`, `sync` (pull with rebase when local commits exist, push with one retry).
+- Generated indexes (`global/index.md`, `projects/<slug>/index.md`, `projects/index.md`) grouped by stage, never hand-edited.
+- Project identity resolved from `MIND_PROJECT`, the git origin URL, the git top-level directory, or the cwd, matched against each project's slug and aliases.
+- Tests: `plugins/mind/tests/test_mind.py`, pytest, git operations against a bare repo under `tmp_path`.
+
 ## 1.3.0 (retro of the 2026-09-11 standard-tier run, see the project's `.dev/SESSION_NOTES_2026-09-11.md`)
 
 - dev-kit `check-impact` / `behavioral-impact-checker`: **behaviour register mode**. When a project keeps `docs/behaviour-register.md` (new template `templates/behaviour-register.md`: one row per user-observable rule with the spec that set it and the test that pins it), the checker diffs the plan against the register and reads only the specs its touched rows cite, instead of the whole spec corpus on every run (28 specs cost 165k tokens and 5.5 minutes per plan and grow linearly). `--seed-register` reads every spec once to write the initial file. Every report ends with a "Register additions" section. New Step 3c traces every output-bound field the plan adds to the functions that render that surface (a flag set on an in-memory object never reached the message because every line was re-projected from the database row).

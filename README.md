@@ -14,9 +14,9 @@ A TDD workflow toolkit for Claude Code. Ships 10 specialist review agents (PR re
 
 A cross-project work router. Reads every project's PRD items, assigns each one a pipeline stage and a tier (`fix` / `standard` / `full`, with subagent caps of 8 / 14 / 20 and a token guideline per tier), runs the single next transition by invoking only the skill or agent its stage table names, records the result on the item, and stops at the two human gates (merge, and `passes`). With the `gh` CLI installed, an item's stage is derived from evidence (the PR's reviews and the `.dev` review reports), never trusted as asserted; the SessionStart brief also says when the local default branch is behind origin. The reference (`plugins/orchestrator/reference/orchestrator.md`) holds the stage machine, the model table, the input contract for every dispatch, reference dispatch costs, and the guardrails (named-path staging, `--body-file`, hook-aware lookups, inline micro-fixes for one-file test-or-string changes, no attribution trailers unless the owner asks).
 
-### [`mind`](plugins/mind/) — 0.0.1
+### [`mind`](plugins/mind/) — 0.1.0
 
-An owner preference and decision store injected at session start, so the owner never has to re-explain the same context twice. Placeholder — not yet built.
+Owner preference and decision store. A SessionStart hook pulls a private notes repo (`MIND_REPO`) and injects the global index, the current project's index, and the list of known projects. `/mind:remember` writes a typed note and pushes it; `/mind:ask` searches notes and cites IDs. Inert without `MIND_REPO`.
 
 ## Install
 
