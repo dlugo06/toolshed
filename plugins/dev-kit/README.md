@@ -16,7 +16,7 @@ A TDD workflow toolkit for Claude Code: specialist review agents, slash commands
 | `spec-checker` | Verifies a branch fully implements a design spec. FAILs only on MISSING or behavior-changing PARTIAL requirements; test-name mismatches, literal-code deviations that preserve behavior, and doc wording differences are INFO and never FAIL. |
 | `test-quality-reviewer` | Audits test quality against the approved scenario plan: weak assertions, coverage gaps. |
 | `test-scenario-planner` | Generates a Given/When/Then scenario map per task before implementation, bounded by tier (`fix` 15-25, `standard` 30-50); maps test bodies already in the plan instead of re-deriving them; verifies every predicate against the real raise sites; writes its report file before finishing. |
-| `behavioral-impact-checker` | Cross-references a plan's behavioral changes against prior design specs (spec index by `git grep`, full read only of the matching ones) and every predicate against the code's raise sites; writes its report file before finishing. |
+| `behavioral-impact-checker` | Cross-references a plan's behavioral changes against the project's behaviour register (`docs/behaviour-register.md`) when one exists, reading only the specs its touched rows cite, else against prior design specs (spec index by `git grep`, full read only of the matching ones); verifies every predicate against the code's raise sites and traces every output-bound field to its render call sites; proposes register rows; `--seed-register` builds the register from the existing specs; writes its report file before finishing. |
 | `ralph-initializer` | Converts source documents into a structured phase PRD for the Ralph loop. |
 
 ## Commands
@@ -27,9 +27,10 @@ A TDD workflow toolkit for Claude Code: specialist review agents, slash commands
 
 Flags that matter:
 
-- `ship [--full|--fix|--light] [--reviewed]` — reviewer tier (standard by default; auto-upgrades to `--full` on dependency, `.env.example`, migration or egress changes); `--reviewed` skips simplify and spec-check after a whole-branch review. Push and PR creation are separate commands; the PR body goes through `--body-file`.
+- `ship [--full|--fix|--light] [--reviewed]` — reviewer tier (standard by default; auto-upgrades to `--full` on dependency, `.env.example`, migration or egress changes); `--reviewed` skips simplify and spec-check after a whole-branch review. Appends the impact report's register rows to `docs/behaviour-register.md` when the project keeps one. Push and PR creation are separate commands; the PR body goes through `--body-file` and carries a Rulings section that reviewers treat as decided.
+- `check-impact [plan path] [--seed-register]` — register mode when `docs/behaviour-register.md` exists, spec-corpus mode otherwise; `--seed-register` writes the initial register from every spec, once.
 - `process-review <PR#> [--autonomous] [--no-replies]` — `--autonomous` rules from stored preferences and posts the decision table on the PR; findings that re-open a recorded ruling are `Reject (decided)`; tiny test-only waves are applied by the caller instead of dispatching a fixer.
-- `plan-tests [plan path] [--fix|--standard|--full]` — bounds the scenario count.
+- `plan-tests [plan path] [--fix|--standard|--full]` — bounds the scenario count; rows are Critical or Defensive, and implementers write plan-named tests plus Critical rows only.
 
 ## Hooks
 
@@ -51,6 +52,7 @@ Everything else — the two `hookify.*.local.md` guardrails (test scenario remin
 - `hookify/` — the two `hookify.*.local.md` guardrails
 - `ralph/` — `ralph-once.sh`, `ralph-afk.sh`, `docs/ralph-prompt.md`, `docs/ralph-evaluator-prompt.md`
 - `prd/` — `phase0-example.json`, `discussions.json`
+- `behaviour-register.md` — one row per user-observable rule; copy to `docs/behaviour-register.md` so `check-impact` diffs plans against it instead of the whole spec corpus
 
 ## Workflow
 
@@ -59,7 +61,7 @@ Everything else — the two `hookify.*.local.md` guardrails (test scenario remin
 When the `orchestrator` plugin is installed it drives this sequence and decides, per item, which plugin runs each step and how many subagents the item may use (see `plugins/orchestrator/reference/orchestrator.md`, §Pipeline tiers). Without it, run the steps by hand:
 
 1. **Spec**: `superpowers:brainstorming` when the cause or design is unknown, then `superpowers:writing-plans`. A bug with a trace goes straight to a spec.
-2. **Check Impact**: `/dev-kit:check-impact` — verify the plan doesn't silently regress behavior from prior specs (run before plan-tests)
+2. **Check Impact**: `/dev-kit:check-impact` — verify the plan doesn't silently change user-observable behavior recorded in the behaviour register (or prior specs when the project has no register yet); run before plan-tests
 3. **Plan Tests**: `/dev-kit:plan-tests` — generate and approve a test scenario map for all tasks
 4. **Implement**: one implementer subagent per batch of related tasks, briefed from the plan. Per-task reviewer loops (`superpowers:subagent-driven-development`) are for foundational work only; they roughly triple the subagent count for the same diff.
 5. **Review**: one whole-branch reviewer with the spec, plan and verification steps, then one fix dispatch. `/dev-kit:review-tests` when tests look thin.
