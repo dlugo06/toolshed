@@ -666,8 +666,8 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
     out += ["\n" + global_idx, "\n" + project_idx, "\n" + projects_idx]
     drafts = _draft_count(cfg)
     if drafts:
-        noun = "note awaits" if drafts == 1 else "notes await"
-        out.append(f"\n{drafts} draft {noun} acceptance: run /mind:ask --drafts\n")
+        noun, verb = ("draft", "awaits") if drafts == 1 else ("drafts", "await")
+        out.append(f"\n{drafts} {noun} {verb} acceptance: run /mind:ask --drafts\n")
     return "".join(out)
 
 

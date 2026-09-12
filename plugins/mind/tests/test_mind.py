@@ -867,8 +867,17 @@ def test_cmd_inject_prints_sections_in_order(repo, tmp_path, monkeypatch):
         + "\n# Global\n\n## review\n- PREF-REV-001 | Global rule | should\n"
         + "\n# proj-a\n\n## review\n- PREF-REV-001 | Project rule | should\n"
         + "\n# Projects\n\n- proj-a | proj-a |  | Describe the project: purpose, kind of work, repo URL.\n"
-        + "\n1 draft note awaits acceptance: run /mind:ask --drafts\n"
+        + "\n1 draft awaits acceptance: run /mind:ask --drafts\n"
     )
+
+
+def test_cmd_inject_plural_draft_count_wording(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Draft one", "d", status="draft")
+    _add(cfg, tmp_path, "Draft two", "d", status="draft")
+    out = mind.cmd_inject(cfg, "startup", tmp_path)
+    assert "\n2 drafts await acceptance: run /mind:ask --drafts\n" in out
 
 
 def test_cmd_inject_without_project(repo, tmp_path):
