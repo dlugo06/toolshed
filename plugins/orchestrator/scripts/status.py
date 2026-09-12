@@ -10,7 +10,8 @@ Usage:
     status.py                 markdown report, one section per project
     status.py --brief         in-flight items only, for the SessionStart hook
     status.py --json          machine-readable
-    status.py --git           also check that recorded branches exist
+    status.py --git           also check that recorded branches exist and report
+                             whether the local default branch is behind origin
     status.py --gh            also check review evidence on recorded PRs (needs gh)
     status.py --project NAME  limit to one project
 
@@ -218,6 +219,54 @@ def _local_branches(project_dir: Path) -> set[str]:
     return {line.strip() for line in out.splitlines() if line.strip()}
 
 
+def default_branch_sync(project_dir: Path, runner=subprocess.run) -> dict | None:
+    """Ahead/behind of the local default branch against its remote-tracking ref.
+
+    Returns {"branch": name, "ahead": int, "behind": int} or None when the
+    repository has no origin/<default> ref (or git fails). Never fetches:
+    the numbers describe what the checkout already knows, which is what the
+    orchestrator reads before cutting a branch. A stale local default branch
+    once produced a SessionStart brief that listed four merged PRs as
+    waiting at the merge gate.
+    """
+    for branch in ("main", "master"):
+        try:
+            out = runner(
+                [
+                    "git",
+                    "-C",
+                    str(project_dir),
+                    "rev-list",
+                    "--left-right",
+                    "--count",
+                    f"{branch}...origin/{branch}",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        parts = out.split()
+        if len(parts) != 2:
+            continue
+        return {"branch": branch, "ahead": int(parts[0]), "behind": int(parts[1])}
+    return None
+
+
+def _sync_note(sync: dict | None) -> str:
+    """One parenthetical for the brief, empty when the default branch is current."""
+    if not sync or not (sync["ahead"] or sync["behind"]):
+        return ""
+    bits = []
+    if sync["behind"]:
+        bits.append(f"behind origin by {sync['behind']}")
+    if sync["ahead"]:
+        bits.append(f"ahead of origin by {sync['ahead']}")
+    return f" (local {sync['branch']} {', '.join(bits)}; fetch and fast-forward before cutting a branch)"
+
+
 def _project_dir(phase_files: list[Path]) -> Path:
     """The git repository that owns the phase files (the directory holding .git)."""
     for parent in phase_files[0].parents:
@@ -287,6 +336,9 @@ def build_world(
             "duplicate_ids": find_duplicate_ids(collect_items(files)),
             "open": rows,
             "in_flight": [r for r in rows if is_in_flight(r)],
+            "sync": default_branch_sync(_project_dir(files), runner=runner)
+            if check_git
+            else None,
         }
     return world
 
@@ -313,6 +365,7 @@ def build_report(world: dict[str, dict], check_git: bool = False) -> str:
             )
         lines.append(
             f"Open items: {len(data['open'])}, in flight: {len(data['in_flight'])}"
+            + _sync_note(data.get("sync"))
         )
         lines.append("")
         lines.append("| id | stage | disp | branch | pr | next |")
@@ -334,7 +387,10 @@ def build_brief(world: dict[str, dict]) -> str:
         if not flight and not dupes:
             continue
         any_flight = True
-        lines.append(f"- {name}: {len(data['open'])} open, {len(flight)} in flight")
+        lines.append(
+            f"- {name}: {len(data['open'])} open, {len(flight)} in flight"
+            + _sync_note(data.get("sync"))
+        )
         if dupes:
             lines.append(f"  - DUPLICATE IDS: {', '.join(dupes)}")
         for r in flight:
