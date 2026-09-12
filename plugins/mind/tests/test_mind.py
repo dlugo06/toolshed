@@ -1924,6 +1924,26 @@ def test_cmd_propose_starts_from_fresh_origin_main_not_stale_local(repo, tmp_pat
     assert log == ["mind: propose PRIN-TEST-002 Tests must assert concrete values"]
 
 
+def test_cmd_propose_avoids_id_claimed_by_sibling_unmerged_proposal_branch(repo, tmp_path, monkeypatch):
+    """M1: two proposals from different topics on the same day, both starting
+    fresh from origin/main (neither merged yet), must never assign the same
+    ID -- the second call scans other unmerged propose/* branches' note
+    filenames for IDs before assigning."""
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d1], "digest-run", "global", None, None, tmp_path)
+    log1 = _git(["log", "--format=%s", "propose/2026-09-12-digest-run"], bare).stdout
+    assert "mind: propose PRIN-TEST-001 Tests must assert concrete values" in log1
+
+    d2 = tmp_path / "b.md"; d2.write_text(DRAFT.replace("Tests must assert concrete values", "Second claim"))
+    mind.cmd_propose(cfg, [d2], "revise-something", "global", None, None, tmp_path)
+    log2 = _git(["log", "--format=%s", "propose/2026-09-12-revise-something"], bare).stdout
+    assert "mind: propose PRIN-TEST-002 Second claim" in log2
+
+
 def test_cmd_propose_unmerged_note_invisible_to_ask_on_main(repo, tmp_path, monkeypatch):
     """Cross-layer: a proposed note must never be visible to ask on the
     shared checkout before the proposal branch is merged."""
@@ -2098,6 +2118,32 @@ def test_lint_rows(repo, tmp_path, monkeypatch):
         "stale: PREF-REV-008 (619 days)\n"
         "mind: lint found 7 issues\n"
     )
+
+
+def test_lint_reports_duplicate_id_across_different_files(repo):
+    """M1: two note files sharing the same frontmatter `id` (e.g. sibling
+    unmerged proposals that both assigned the next free ID and then both
+    merged) must be flagged, or `_find_note`/affirm/retire silently pick
+    whichever sorts first."""
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    _raw_note(cfg, "PREF-REV-001-a.md", title="A")
+    _raw_note(cfg, "PREF-REV-001-b.md", title="B")
+    out = mind.cmd_lint(cfg, 180)
+    assert "duplicate id: global/notes/PREF-REV-001-a.md and global/notes/PREF-REV-001-b.md\n" in out
+
+
+def test_lint_duplicate_id_row_between_mismatch_and_dangling(repo):
+    """The row order the ruling pins: malformed, mismatch, duplicate id,
+    dangling, ..."""
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    _raw_note(cfg, "PREF-REV-001-a.md", title="A")
+    _raw_note(cfg, "PREF-REV-001-b.md", title="B")
+    _raw_note(cfg, "PREF-REV-005-z.md", id="PREF-REV-006", title="Z")   # mismatch
+    _raw_note(cfg, "PREF-REV-004-y.md", id="PREF-REV-004", title="Y", supersedes="PREF-REV-999")   # dangling
+    lines = mind.cmd_lint(cfg, 180).splitlines()
+    assert (lines.index("mismatch: global/notes/PREF-REV-005-z.md id=PREF-REV-006")
+            < lines.index("duplicate id: global/notes/PREF-REV-001-a.md and global/notes/PREF-REV-001-b.md")
+            < lines.index("dangling: PREF-REV-004 supersedes PREF-REV-999"))
 
 
 def test_lint_reports_budget_overflow(repo, tmp_path, monkeypatch):

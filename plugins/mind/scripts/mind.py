@@ -503,12 +503,18 @@ def match_project(cfg: Config, candidate: str) -> str | None:
     return None
 
 
-def next_id(notes_dir: Path, note_type: str, stage: str) -> str:
+def next_id(notes_dir: Path, note_type: str, stage: str, taken: frozenset[str] = frozenset()) -> str:
+    """`taken` is extra IDs to treat as already claimed even though they are
+    not (yet) files in `notes_dir` -- IDs a sibling unmerged propose/* branch
+    already assigned in the same notes directory."""
     prefix = f"{TYPE_CODES[note_type]}-{STAGE_CODES[stage]}-"
     highest = 0
     for note in load_notes(notes_dir):
         if note.id.startswith(prefix) and note.id[len(prefix):].isdigit():
             highest = max(highest, int(note.id[len(prefix):]))
+    for note_id in taken:
+        if note_id.startswith(prefix) and note_id[len(prefix):].isdigit():
+            highest = max(highest, int(note_id[len(prefix):]))
     return f"{prefix}{highest + 1:03d}"
 
 
@@ -611,8 +617,8 @@ def _ensure_project(cfg: Config, slug: str) -> bool:
     return True
 
 
-def _write_note(cfg: Config, notes_dir: Path, meta: dict, body: str) -> Path:
-    meta["id"] = next_id(notes_dir, meta["type"], meta["stage"])
+def _write_note(cfg: Config, notes_dir: Path, meta: dict, body: str, taken: frozenset[str] = frozenset()) -> Path:
+    meta["id"] = next_id(notes_dir, meta["type"], meta["stage"], taken)
     fields = ["id", "title", "type", "stage", "scope", "strength", "status", "affirmed", "supersedes", "source"]
     if "refers" in meta:
         fields.append("refers")
@@ -738,6 +744,34 @@ def _worktree_path(cfg: Config, branch: str) -> Path:
     return cfg.home.parent / ("worktree-" + branch.replace("/", "-"))
 
 
+_FILENAME_ID_RE = re.compile(r"^([A-Z]+-[A-Z]+-\d{3})-")
+
+
+def _sibling_proposal_ids(cfg: Config, own_branch: str, rel_dir: str) -> frozenset[str]:
+    """IDs already claimed in `rel_dir` (e.g. "global/notes") by *other*
+    unmerged propose/* branches on the remote: two same-day proposals from
+    different topics (a digest and a revise-<ID>) both starting from
+    origin/main must never assign the same next ID."""
+    ids: set[str] = set()
+    proc = git(cfg, ["branch", "-r", "--list", "origin/propose/*", "--format=%(refname:short)"], cfg.home, 5)
+    for ref in proc.stdout.split():
+        if not ref or ref == f"origin/{own_branch}":
+            continue
+        listing = git(cfg, ["ls-tree", "-r", "--name-only", ref, "--", "global/notes", "projects"], cfg.home, 10)
+        if listing.returncode != 0:
+            continue
+        for path in listing.stdout.splitlines():
+            if "/" not in path:
+                continue
+            parent, name = path.rsplit("/", 1)
+            if parent != rel_dir:
+                continue
+            m = _FILENAME_ID_RE.match(name)
+            if m:
+                ids.add(m.group(1))
+    return frozenset(ids)
+
+
 def _proposal_body(rows: list[tuple[str, "Note"]], cwd_slug: str) -> str:
     out = []
     for prefix, n in rows:
@@ -812,7 +846,9 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
             meta.setdefault("supersedes", None)
             meta.setdefault("source", f"proposal {_today()}, {resolve_candidate(cfg, cwd)}")
             meta["scope"] = scope_value
-            path = _write_note(wcfg, notes_dir, meta, text)
+            rel_dir = notes_dir.relative_to(wt).as_posix()
+            taken = _sibling_proposal_ids(cfg, branch, rel_dir)
+            path = _write_note(wcfg, notes_dir, meta, text, taken)
             old = _find_note(wcfg, meta["supersedes"]) if meta.get("supersedes") else None
             if old is not None:
                 old.meta["status"] = "superseded"
@@ -1046,6 +1082,13 @@ def cmd_lint(cfg: Config, days: int) -> str:
         if not path.name.startswith(meta["id"] + "-"):
             rows.append(f"mismatch: {rel} id={meta['id']}")
         notes.append((prefix, Note(path, meta, body)))
+    by_id: dict[str, list[Note]] = {}
+    for p, n in notes:
+        by_id.setdefault(p + n.id, []).append(n)
+    for dupes in by_id.values():
+        for a, b in zip(dupes, dupes[1:]):
+            rows.append(f"duplicate id: {a.path.relative_to(cfg.home).as_posix()} and "
+                        f"{b.path.relative_to(cfg.home).as_posix()}")
     ids = {p + n.id: n for p, n in notes}
     for p, n in notes:
         sup = n.meta.get("supersedes")
