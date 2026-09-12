@@ -314,6 +314,123 @@ def reindex(cfg: Config) -> None:
         (cfg.home / "projects" / slug / "index.md").write_text(build_index(load_notes(project_notes_dir(cfg, slug)), slug))
 
 
+class ValidationError(Exception):
+    pass
+
+
+def _kebab(title: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
+
+
+def _today() -> str:
+    return dt.date.today().isoformat()
+
+
+def cmd_init(cfg: Config) -> str:
+    schema = Path(__file__).resolve().parents[1] / "templates" / "schema.md"
+    (cfg.home / "schema.md").write_text(schema.read_text())
+    global_notes_dir(cfg).mkdir(parents=True, exist_ok=True)
+    (cfg.home / "projects").mkdir(exist_ok=True)
+    reindex(cfg)
+    commit_all(cfg, "mind: init")
+    msg = sync(cfg)
+    return "mind: initialised global/ and projects/" + (f", {msg}" if msg else "")
+
+
+STUB_PROJECT_BODY = "Describe the project: purpose, kind of work, repo URL.\n"
+
+
+def _ensure_project(cfg: Config, slug: str) -> bool:
+    """Create projects/<slug>/ with a stub project.md. Returns True when created."""
+    d = cfg.home / "projects" / slug
+    if (d / "project.md").is_file():
+        return False
+    (d / "notes").mkdir(parents=True, exist_ok=True)
+    meta = {"slug": slug, "name": slug, "repo": None, "stack": [], "aliases": [], "related": [], "updated": _today()}
+    (d / "project.md").write_text(render_frontmatter(meta, STUB_PROJECT_BODY))
+    return True
+
+
+def _write_note(cfg: Config, notes_dir: Path, meta: dict, body: str) -> Path:
+    meta["id"] = next_id(notes_dir, meta["type"], meta["stage"])
+    ordered = {k: meta.get(k) for k in ["id", "title", "type", "stage", "scope", "strength", "status", "affirmed", "supersedes", "source"]}
+    path = notes_dir / f"{ordered['id']}-{_kebab(ordered['title'])}.md"
+    path.write_text(render_frontmatter(ordered, body))
+    return path
+
+
+def cmd_add(cfg: Config, draft: Path, scope: str, project: str | None, cwd: Path) -> str:
+    meta, body = parse_frontmatter(draft.read_text())
+    errs = validate_meta(meta)
+    if errs:
+        raise ValidationError("; ".join(errs))
+    created_stub = False
+    if scope == "global":
+        notes_dir, scope_value, prefix = global_notes_dir(cfg), "global", ""
+    else:
+        candidate = project or resolve_candidate(cfg, cwd)
+        slug = match_project(cfg, candidate) or candidate
+        created_stub = _ensure_project(cfg, slug)
+        notes_dir, scope_value, prefix = project_notes_dir(cfg, slug), f"project:{slug}", f"{slug}/"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    meta.setdefault("status", "accepted")
+    meta.setdefault("affirmed", _today())
+    meta.setdefault("supersedes", None)
+    meta.setdefault("source", f"session {_today()}, {resolve_candidate(cfg, cwd)}")
+    meta["scope"] = scope_value
+    # Pull first so the ID is assigned against the latest remote state.
+    sync(cfg, pull_only=True)
+    path = _write_note(cfg, notes_dir, meta, body)
+    reindex(cfg)
+    commit_all(cfg, f"mind: add {meta['id']} {meta['title']}")
+    msg = sync(cfg)
+    if msg and msg.startswith("mind: offline") and _conflicting_id(cfg, path):
+        # Another machine took this ID: back out, take the next free one, retry once.
+        git(cfg, ["reset", "-q", "--hard", "HEAD~1"], cfg.home, 10)
+        git(cfg, ["pull", "-q", "--ff-only"], cfg.home, GIT_TIMEOUTS["pull"])
+        path = _write_note(cfg, notes_dir, meta, body)
+        reindex(cfg)
+        commit_all(cfg, f"mind: add {meta['id']} {meta['title']}")
+        msg = sync(cfg)
+    note_id = parse_frontmatter(path.read_text())[0]["id"]
+    scope_label = "global" if scope == "global" else f"project {prefix[:-1]}"
+    result = f"mind: added {prefix}{note_id} ({scope_label}), " + (msg or "pushed")
+    if created_stub:
+        result += "; project.md is a stub, fill it in"
+    return result
+
+
+def _conflicting_id(cfg: Config, path: Path) -> bool:
+    """True when the remote already has a different file with this note's ID."""
+    note_id = parse_frontmatter(path.read_text())[0]["id"]
+    git(cfg, ["fetch", "-q"], cfg.home, GIT_TIMEOUTS["pull"])
+    rel = path.relative_to(cfg.home).parent.as_posix()
+    listing = git(cfg, ["ls-tree", "--name-only", "@{u}", rel + "/"], cfg.home, 5).stdout.split()
+    return any(Path(p).name.startswith(note_id + "-") and Path(p).name != path.name for p in listing)
+
+
+def _find_note(cfg: Config, note_id: str) -> Note | None:
+    dirs = [global_notes_dir(cfg)] + [project_notes_dir(cfg, s) for s in list_projects(cfg)]
+    for d in dirs:
+        for n in load_notes(d):
+            if n.id == note_id:
+                return n
+    return None
+
+
+def cmd_accept(cfg: Config, note_id: str) -> str:
+    note = _find_note(cfg, note_id)
+    if note is None:
+        raise ValidationError(f"no note with id {note_id}")
+    note.meta["status"] = "accepted"
+    note.meta["affirmed"] = _today()
+    note.path.write_text(render_frontmatter(note.meta, note.body))
+    reindex(cfg)
+    commit_all(cfg, f"mind: accept {note_id}")
+    msg = sync(cfg)
+    return f"mind: accepted {note_id}, " + (msg or "pushed")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mind.py", add_help=True)
     sub = p.add_subparsers(dest="cmd")
@@ -345,8 +462,31 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
     if args.cmd is None:
         print(USAGE, file=sys.stderr)
         return 2
-    print(USAGE, file=sys.stderr)
-    return 2
+    try:
+        cfg = Config.from_env(env, cwd)
+    except ConfigError as exc:
+        print(f"mind: {exc}", file=sys.stderr)
+        return 1
+    try:
+        if args.cmd == "init":
+            msg = ensure_checkout(cfg) or cmd_init(cfg)
+        elif args.cmd == "add":
+            msg = ensure_checkout(cfg) or cmd_add(cfg, Path(args.draft), args.scope, args.project, cwd)
+        elif args.cmd == "accept":
+            msg = ensure_checkout(cfg) or cmd_accept(cfg, args.note_id)
+        elif args.cmd == "reindex":
+            reindex(cfg)
+            msg = "mind: reindexed"
+        elif args.cmd == "sync":
+            msg = ensure_checkout(cfg) or sync(cfg, pull_only=args.pull_only) or "mind: in sync"
+        else:
+            print(USAGE, file=sys.stderr)
+            return 2
+    except ValidationError as exc:
+        print(f"mind: {exc}", file=sys.stderr)
+        return 1
+    print(msg)
+    return 0
 
 
 if __name__ == "__main__":

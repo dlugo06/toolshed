@@ -1,5 +1,6 @@
 """Tests for the mind plugin script (scripts/mind.py) and its hook."""
 import dataclasses
+import datetime as dt
 import os
 import subprocess
 import sys
@@ -274,3 +275,161 @@ def test_build_projects_index_and_reindex(repo):
     )
     assert (cfg.home / "global" / "index.md").read_text() == "# Global\n"
     assert (cfg.home / "projects" / "erp-quotes" / "index.md").read_text() == "# erp-quotes\n"
+
+
+DRAFT = """---
+title: Tests must assert concrete values
+type: principle
+stage: testing
+strength: must
+---
+Assert exact values, never `is not None`.
+
+**Why:** weak assertions hide bugs.
+**How to apply:** compare to the literal expected value.
+"""
+
+
+@pytest.fixture
+def seed_note():
+    def _seed(seed, rel, note_id, title, status="accepted"):
+        p = seed / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        _git(["pull", "-q", "--rebase"], seed)
+        p.write_text(mind.render_frontmatter({"id": note_id, "title": title, "type": "principle", "stage": "testing",
+                                              "scope": "global", "strength": "must", "status": status,
+                                              "affirmed": "2026-09-12", "supersedes": None, "source": "t"}, f"{title} body.\n"))
+        _git(["add", "."], seed)
+        _git(["commit", "-q", "-m", f"seed {note_id}"], seed)
+        _git(["push", "-q"], seed)
+    return _seed
+
+
+def test_cmd_init_creates_layout_and_pushes(repo):
+    cfg, bare, _ = repo
+    assert mind.cmd_init(cfg) == "mind: initialised global/ and projects/"
+    assert (cfg.home / "schema.md").read_text() == (PLUGIN / "templates" / "schema.md").read_text()
+    assert (cfg.home / "global" / "index.md").read_text() == "# Global\n"
+    assert _git(["log", "--format=%s", "main"], bare).stdout.splitlines()[0] == "mind: init"
+
+
+def test_cmd_add_global_assigns_id_and_pushes(repo, tmp_path):
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    draft = tmp_path / "d.md"
+    draft.write_text(DRAFT)
+    out = mind.cmd_add(cfg, draft, "global", None, tmp_path)
+    assert out == "mind: added PRIN-TEST-001 (global), pushed"
+    path = cfg.home / "global" / "notes" / "PRIN-TEST-001-tests-must-assert-concrete-values.md"
+    meta, body = mind.parse_frontmatter(path.read_text())
+    assert meta == {"id": "PRIN-TEST-001", "title": "Tests must assert concrete values", "type": "principle",
+                    "stage": "testing", "scope": "global", "strength": "must", "status": "accepted",
+                    "affirmed": dt.date.today().isoformat(), "supersedes": None,
+                    "source": f"session {dt.date.today().isoformat()}, {tmp_path.name.lower()}"}
+    assert body.startswith("Assert exact values")
+    assert (cfg.home / "global" / "index.md").read_text() == "# Global\n\n## testing\n- PRIN-TEST-001 | Tests must assert concrete values | must\n"
+    assert _git(["log", "--format=%s", "main"], bare).stdout.splitlines()[0] == "mind: add PRIN-TEST-001 Tests must assert concrete values"
+
+
+def test_cmd_add_project_creates_stub(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    work = tmp_path / "New-Proj"
+    work.mkdir()
+    draft = tmp_path / "d.md"
+    draft.write_text(DRAFT)
+    out = mind.cmd_add(cfg, draft, "project", None, work)
+    assert out == "mind: added new-proj/PRIN-TEST-001 (project new-proj), pushed; project.md is a stub, fill it in"
+    meta, body = mind.load_project(cfg, "new-proj")
+    assert meta["slug"] == "new-proj"
+    assert meta["aliases"] == []
+    assert body == "Describe the project: purpose, kind of work, repo URL.\n"
+    assert (cfg.home / "projects" / "index.md").read_text() == "# Projects\n\n- new-proj | new-proj |  | Describe the project: purpose, kind of work, repo URL.\n"
+
+
+def test_cmd_add_rejects_invalid_frontmatter(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    draft = tmp_path / "d.md"
+    draft.write_text("---\ntitle: x\ntype: wish\nstage: review\nstrength: must\n---\nb\n")
+    with pytest.raises(mind.ValidationError, match="type must be one of"):
+        mind.cmd_add(cfg, draft, "global", None, tmp_path)
+    assert list(mind.global_notes_dir(cfg).glob("*.md")) == []
+
+
+def test_cmd_add_reports_push_failure_but_keeps_commit(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "push", lambda c: "mind: push failed, note is committed locally; it will push on the next remember or session start")
+    draft = tmp_path / "d.md"
+    draft.write_text(DRAFT)
+    out = mind.cmd_add(cfg, draft, "global", None, tmp_path)
+    assert out == "mind: added PRIN-TEST-001 (global), mind: push failed, note is committed locally; it will push on the next remember or session start"
+    assert _git(["log", "-1", "--format=%s"], cfg.home).stdout.strip() == "mind: add PRIN-TEST-001 Tests must assert concrete values"
+
+
+def test_cmd_add_renames_on_duplicate_id_from_remote(repo, tmp_path, seed_note):
+    """Two machines add PRIN-TEST-001 at once: the loser gets 002."""
+    cfg, bare, seed = repo
+    mind.cmd_init(cfg)
+    seed_note(seed, "global/notes/PRIN-TEST-001-other.md", "PRIN-TEST-001", "Other")   # pushed by the other machine
+    draft = tmp_path / "d.md"
+    draft.write_text(DRAFT)
+    out = mind.cmd_add(cfg, draft, "global", None, tmp_path)
+    assert out == "mind: added PRIN-TEST-002 (global), pushed"
+    names = sorted(p.name for p in mind.global_notes_dir(cfg).glob("*.md"))
+    assert names == ["PRIN-TEST-001-other.md", "PRIN-TEST-002-tests-must-assert-concrete-values.md"]
+
+
+def test_cmd_add_two_checkouts_race_through_cmd_add(repo, tmp_path, monkeypatch):
+    """Two independent checkouts (not a raw seeded push) both race cmd_add for
+    the same next ID. The loser's own _conflicting_id retry path lands it on
+    PRIN-TEST-002, and the bare remote ends with both 001 and 002 present."""
+    cfg_a, bare, _ = repo
+    mind.cmd_init(cfg_a)
+    home_b = tmp_path / "home_b"
+    cfg_b = dataclasses.replace(cfg_a, home=home_b)
+    assert mind.ensure_checkout(cfg_b) is None
+
+    draft_a = tmp_path / "a.md"
+    draft_a.write_text(DRAFT)
+    draft_b = tmp_path / "b.md"
+    draft_b.write_text(DRAFT.replace("Tests must assert concrete values", "Never skip the plan tests step"))
+
+    # cfg_b's pre-write pull-only sync completes (finds nothing new) before cfg_a pushes.
+    real_sync = mind.sync
+    monkeypatch.setattr(
+        mind, "sync",
+        lambda c, pull_only=False: None if (pull_only and c.home == cfg_b.home) else real_sync(c, pull_only),
+    )
+
+    out_a = mind.cmd_add(cfg_a, draft_a, "global", None, tmp_path)
+    assert out_a == "mind: added PRIN-TEST-001 (global), pushed"
+
+    out_b = mind.cmd_add(cfg_b, draft_b, "global", None, tmp_path)
+    assert out_b == "mind: added PRIN-TEST-002 (global), pushed"
+
+    log = _git(["log", "--format=%s", "main"], bare).stdout.splitlines()
+    assert "mind: add PRIN-TEST-001 Tests must assert concrete values" in log
+    assert "mind: add PRIN-TEST-002 Never skip the plan tests step" in log
+    listing = _git(["ls-tree", "--name-only", "main", "global/notes/"], bare).stdout.split()
+    names = sorted(Path(p).name for p in listing)
+    assert names == [
+        "PRIN-TEST-001-tests-must-assert-concrete-values.md",
+        "PRIN-TEST-002-never-skip-the-plan-tests-step.md",
+    ]
+
+
+def test_cmd_accept_flips_draft(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    draft = tmp_path / "d.md"
+    draft.write_text(DRAFT.replace("strength: must\n", "strength: must\nstatus: draft\n"))
+    mind.cmd_add(cfg, draft, "global", None, tmp_path)
+    assert (cfg.home / "global" / "index.md").read_text() == "# Global\n"
+    assert mind.cmd_accept(cfg, "PRIN-TEST-001") == "mind: accepted PRIN-TEST-001, pushed"
+    meta, _ = mind.parse_frontmatter(next(mind.global_notes_dir(cfg).glob("PRIN-TEST-001-*.md")).read_text())
+    assert meta["status"] == "accepted"
+    assert meta["affirmed"] == dt.date.today().isoformat()
+    with pytest.raises(mind.ValidationError, match="no note with id NOPE-X-001"):
+        mind.cmd_accept(cfg, "NOPE-X-001")
