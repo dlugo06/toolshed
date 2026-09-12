@@ -525,6 +525,31 @@ def test_build_index_groups_by_stage_and_skips_drafts():
     )
 
 
+def test_priority_order_keeps_must_first_then_round_robins_stages():
+    """8 rows across 3 stages: the must row survives any budget, and the
+    round-robin means the first cut after it takes one row per stage
+    before taking a second row from any single stage."""
+    def note(i, stage, strength):
+        return mind.Note(Path(i), {"id": i, "title": f"T {i}", "stage": stage, "strength": strength, "status": "accepted"}, "b\n")
+    notes = [
+        note("PRIN-ID-001", "identity", "must"),
+        note("PREF-ID-001", "identity", "should"),
+        note("PREF-ID-002", "identity", "should"),
+        note("PREF-PROD-001", "product", "should"),
+        note("PREF-PROD-002", "product", "should"),
+        note("PREF-PROD-003", "product", "should"),
+        note("PREF-PLAN-001", "planning", "should"),
+        note("PREF-PLAN-002", "planning", "should"),
+    ]
+    ordered = mind._priority_order(notes)
+    assert [n.id for n in ordered] == [
+        "PRIN-ID-001", "PREF-ID-001", "PREF-PROD-001", "PREF-PLAN-001",
+        "PREF-ID-002", "PREF-PROD-002", "PREF-PLAN-002", "PREF-PROD-003",
+    ]
+    # Budget for exactly 4 kept rows: all must rows, then one per stage.
+    assert [n.id for n in ordered[:4]] == ["PRIN-ID-001", "PREF-ID-001", "PREF-PROD-001", "PREF-PLAN-001"]
+
+
 def test_build_projects_index_and_reindex(repo):
     cfg, _, _ = repo
     _write_project(cfg, "erp-quotes")
@@ -998,6 +1023,44 @@ def test_cmd_inject_truncates_global_first(repo, tmp_path, monkeypatch):
     assert "- PREF-REV-001 | Project rule | should" in out          # project index intact
     assert "- proj-a | proj-a |" in out                               # projects index intact
     assert "Global rule number 7" not in out
+
+
+def test_cmd_inject_truncation_round_robins_stages_and_keeps_must(repo, tmp_path, monkeypatch):
+    """Without the priority order, a flat prefix truncation would keep every
+    identity row before ever showing a product or planning row, and could
+    drop a must rule just because it sorts late. Under a budget that keeps
+    exactly 4 of these 8 rows, the survivors must be the must row plus one
+    row from each of the three stages, not four identity rows."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+
+    def add_note(title, stage, strength="should"):
+        d = tmp_path / f"{mind._kebab(title)}-{stage}.md"
+        d.write_text(mind.render_frontmatter(
+            {"title": title, "type": "preference", "stage": stage, "strength": strength}, "b\n"))
+        return mind.cmd_add(cfg, d, "global", None, tmp_path)
+
+    add_note("T long enough title to matter here", "identity", "must")
+    add_note("T long enough title to matter here", "identity")
+    add_note("T long enough title to matter here", "product")
+    add_note("T long enough title to matter here", "planning")
+    add_note("T long enough title to matter here", "identity")
+    add_note("T long enough title to matter here", "product")
+    add_note("T long enough title to matter here", "planning")
+    add_note("T long enough title to matter here", "product")
+
+    monkeypatch.setattr(mind, "INDEX_BUDGET", 400)
+    cfg_no_project = dataclasses.replace(cfg, project="zzz-no-such-project")
+    out = mind.cmd_inject(cfg_no_project, "clear", tmp_path)
+    assert "+4 more, run /mind:ask <topic>\n" in out
+    assert "PREF-ID-001" in out  # the must row
+    assert "PREF-ID-002" in out  # one per stage round-robin
+    assert "PREF-PROD-001" in out
+    assert "PREF-PLAN-001" in out
+    assert "PREF-ID-003" not in out
+    assert "PREF-PROD-002" not in out
+    assert "PREF-PROD-003" not in out
+    assert "PREF-PLAN-002" not in out
 
 
 def test_cmd_inject_index_budget_of_10_still_prints_projects_index(repo, tmp_path, monkeypatch):

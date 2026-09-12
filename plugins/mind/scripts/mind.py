@@ -386,16 +386,39 @@ def next_id(notes_dir: Path, note_type: str, stage: str) -> str:
     return f"{prefix}{highest + 1:03d}"
 
 
-def build_index(notes: list[Note], heading: str) -> str:
-    accepted = [n for n in notes if n.status == "accepted"]
+def _render_notes(notes: list[Note], heading: str) -> str:
     out = [f"# {heading}\n"]
     for stage in STAGES:
-        rows = [n for n in accepted if n.stage == stage]
+        rows = [n for n in notes if n.stage == stage]
         if not rows:
             continue
         out.append(f"\n## {stage}\n")
         out.extend(f"- {n.id} | {n.title} | {n.strength}\n" for n in sorted(rows, key=lambda n: n.id))
     return "".join(out)
+
+
+def _priority_order(notes: list[Note]) -> list[Note]:
+    """Accepted notes ordered for a budget-truncated injection: every `must`
+    row first (by id), then one row per stage round-robin among the rest,
+    cycling through STAGES in order. A full mind under a tight budget must
+    not systematically starve the later stages (security, monitoring, ...)
+    just because _truncate used to keep a flat prefix, and a `must` rule
+    must never be the one dropped."""
+    accepted = [n for n in notes if n.status == "accepted"]
+    must = sorted((n for n in accepted if n.strength == "must"), key=lambda n: n.id)
+    queues = {s: sorted((n for n in accepted if n.strength != "must" and n.stage == s), key=lambda n: n.id)
+              for s in STAGES}
+    order = list(must)
+    while any(queues.values()):
+        for s in STAGES:
+            if queues[s]:
+                order.append(queues[s].pop(0))
+    return order
+
+
+def build_index(notes: list[Note], heading: str) -> str:
+    accepted = [n for n in notes if n.status == "accepted"]
+    return _render_notes(accepted, heading)
 
 
 def build_projects_index(cfg: Config) -> str:
@@ -614,33 +637,45 @@ PROTOCOL = (
 )
 
 
-def _truncate(section: str, keep: int) -> str:
-    """Keep the heading and the first `keep` note rows; say how many were cut."""
-    lines = section.splitlines(keepends=True)
-    rows = [i for i, l in enumerate(lines) if l.startswith("- ")]
-    if keep >= len(rows):
-        return section
-    cut = len(rows) - keep
-    last = rows[keep - 1] + 1 if keep > 0 else rows[0]
-    return "".join(lines[:last]) + f"+{cut} more, run /mind:ask <topic>\n"
+def _truncate_notes(notes: list[Note], heading: str, keep: int) -> str:
+    """Render `heading` plus the top `keep` rows in priority order (every
+    `must` row first, then one row per stage round-robin) and say how many
+    were cut. Keeping the priority order (not a flat prefix of the full
+    render) means a tight budget still surfaces a must rule and a sample of
+    every stage, not just whichever stage sorts first."""
+    accepted = [n for n in notes if n.status == "accepted"]
+    ordered = _priority_order(notes)
+    if keep >= len(ordered):
+        return _render_notes(accepted, heading)
+    cut = len(ordered) - keep
+    return _render_notes(ordered[:keep], heading) + f"+{cut} more, run /mind:ask <topic>\n"
 
 
-def _fit(global_idx: str, project_idx: str, projects_idx: str) -> tuple[str, str]:
+def _fit(global_notes: list[Note], global_heading: str,
+         project_notes: list[Note] | None, project_heading: str,
+         projects_idx: str) -> tuple[str, str]:
     budget = INDEX_BUDGET - len(projects_idx)
-    total = len(global_idx) + len(project_idx)
-    if total <= budget:
+    global_idx = _render_notes([n for n in global_notes if n.status == "accepted"], global_heading)
+    # `project_heading` doubles as the "no notes for X yet" fallback text
+    # when no project matched (project_notes is None): a plain string with
+    # no note rows, so it is never itself truncated further.
+    project_idx = (project_heading if project_notes is None
+                   else _render_notes([n for n in project_notes if n.status == "accepted"], project_heading))
+    if len(global_idx) + len(project_idx) <= budget:
         return global_idx, project_idx
-    # Shrink global row by row, then project. Each cut is taken from the
-    # original section, not from the previous pass's already-truncated
-    # output, so the "+N more" count stays correct across every iteration.
-    original_global, original_project = global_idx, project_idx
-    for idx_name in ("global", "project"):
-        original = original_global if idx_name == "global" else original_project
-        rows = sum(1 for l in original.splitlines() if l.startswith("- "))
+    # Shrink global row by row, then project. Priority order (must rows
+    # first, then one row per stage round-robin) is re-derived from the
+    # original note list each time, never from the previous pass's
+    # already-cut output, so the "+N more" count stays correct throughout.
+    for which in ("global", "project"):
+        notes, heading = (global_notes, global_heading) if which == "global" else (project_notes, project_heading)
+        if notes is None:
+            continue
+        rows = len([n for n in notes if n.status == "accepted"])
         while rows > 0 and len(global_idx) + len(project_idx) > budget:
             rows -= 1
-            cur = _truncate(original, rows)
-            if idx_name == "global":
+            cur = _truncate_notes(notes, heading, rows)
+            if which == "global":
                 global_idx = cur
             else:
                 project_idx = cur
@@ -666,12 +701,13 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
             # on disk until it is regenerated locally.
             reindex(cfg)
     out.append(PROTOCOL.format(home=cfg.home))
-    global_idx = (cfg.home / "global" / "index.md").read_text() if (cfg.home / "global" / "index.md").is_file() else "# Global\n"
     candidate = resolve_candidate(cfg, cwd)
     slug = match_project(cfg, candidate)
-    project_idx = (cfg.home / "projects" / slug / "index.md").read_text() if slug else f"no notes for {candidate} yet\n"
+    global_notes = load_notes(global_notes_dir(cfg))
+    project_notes = load_notes(project_notes_dir(cfg, slug)) if slug else None
+    project_heading = slug if slug else f"no notes for {candidate} yet\n"
     projects_idx = (cfg.home / "projects" / "index.md").read_text() if (cfg.home / "projects" / "index.md").is_file() else "# Projects\n"
-    global_idx, project_idx = _fit(global_idx, project_idx, projects_idx)
+    global_idx, project_idx = _fit(global_notes, "Global", project_notes, project_heading, projects_idx)
     out += ["\n" + global_idx, "\n" + project_idx, "\n" + projects_idx]
     drafts = _draft_count(cfg)
     if drafts:
