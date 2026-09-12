@@ -279,6 +279,46 @@ def test_pull_offline_falls_back(repo, monkeypatch):
     assert msg.startswith("mind: offline, using cached copy from ")
 
 
+def test_pull_first_run_when_no_upstream_yet(tmp_path):
+    """A brand-new, still-empty data repo has no upstream tracking branch at
+    all: pull() must say so plainly rather than call it offline forever."""
+    bare = tmp_path / "remote.git"
+    _git(["init", "--bare", "-q", "--initial-branch=main", str(bare)], tmp_path)
+    home = tmp_path / "home"
+    env = {"MIND_REPO": str(bare), "MIND_HOME": str(home)}
+    cfg = mind.Config.from_env(env, tmp_path)
+    assert mind.ensure_checkout(cfg) is None
+    assert mind.pull(cfg) == "mind: first run, nothing to pull yet"
+
+
+def test_pull_diverged_reports_sync_blocked_not_offline(repo):
+    """A genuinely diverged branch (both sides moved) is not a network
+    problem: pull --ff-only refuses it outright, and that must be reported
+    as a sync block the owner can act on, never mislabeled offline."""
+    cfg, bare, seed = repo
+    (cfg.home / "local.md").write_text("local\n")
+    mind.commit_all(cfg, "mind: local change")
+    (seed / "remote.md").write_text("remote\n")
+    _git(["add", "."], seed)
+    _git(["commit", "-q", "-m", "remote change"], seed)
+    _git(["push", "-q"], seed)
+    msg = mind.pull(cfg)
+    assert msg.startswith("mind: sync blocked: ")
+    assert "offline" not in msg
+
+
+def test_rebase_failure_message_shares_pull_classification(repo):
+    """_rebase_failure_message must route a non-conflict rebase refusal
+    through the same classifier as pull(), not its own offline-only text."""
+    cfg, _, _ = repo
+    proc = subprocess.CompletedProcess(
+        args=["git", "pull", "--rebase"], returncode=1, stdout="",
+        stderr="fatal: Not possible to fast-forward, aborting.\n",
+    )
+    msg = mind._rebase_failure_message(cfg, proc)
+    assert msg == "mind: sync blocked: fatal: Not possible to fast-forward, aborting."
+
+
 def test_cmd_init_against_empty_bare_repo_pushes_and_sets_upstream(tmp_path):
     """The documented first-run path: an empty data repo has no upstream
     branch yet. init must still push, not report offline forever."""

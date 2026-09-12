@@ -207,6 +207,28 @@ def _head_date(cfg: Config) -> str:
     return out.stdout.strip() or "unknown"
 
 
+_OFFLINE_RE = re.compile(
+    r"Could not resolve|Connection|timed out|Permission denied|Authentication|publickey",
+    re.IGNORECASE,
+)
+
+
+def _pull_failure_message(cfg: Config, proc: subprocess.CompletedProcess | None) -> str:
+    """Classify why a pull (or pull --rebase) failed. `proc` is None on a
+    timeout. Order: no upstream at all (a brand-new empty data repo, nothing
+    to pull yet) beats every other reading; a timeout or stderr naming a
+    network/auth problem is offline; anything else (diverged, dirty tree,
+    corrupt repo) is a sync block the owner must act on, not a transient
+    offline blip."""
+    if not _has_upstream(cfg):
+        return "mind: first run, nothing to pull yet"
+    if proc is None or _OFFLINE_RE.search(proc.stderr or ""):
+        return f"mind: offline, using cached copy from {_head_date(cfg)}"
+    lines = (proc.stderr or "").strip().splitlines()
+    last = lines[-1] if lines else "unknown error"
+    return f"mind: sync blocked: {last}"
+
+
 def ensure_checkout(cfg: Config) -> str | None:
     if (cfg.home / ".git").is_dir():
         return None
@@ -225,9 +247,9 @@ def pull(cfg: Config) -> str | None:
         proc = git(cfg, ["pull", "-q", "--ff-only"], cfg.home, GIT_TIMEOUTS["pull"])
     except subprocess.TimeoutExpired:
         proc = None
-    if proc is None or proc.returncode != 0:
-        return f"mind: offline, using cached copy from {_head_date(cfg)}"
-    return None
+    if proc is not None and proc.returncode == 0:
+        return None
+    return _pull_failure_message(cfg, proc)
 
 
 def commit_all(cfg: Config, message: str) -> subprocess.CompletedProcess:
@@ -276,12 +298,12 @@ def _conflicted_paths(cfg: Config) -> list[str]:
     return [line for line in proc.stdout.splitlines() if line]
 
 
-def _rebase_failure_message(cfg: Config, ran: bool) -> str:
-    conflicts = _conflicted_paths(cfg) if ran else []
+def _rebase_failure_message(cfg: Config, proc: subprocess.CompletedProcess | None) -> str:
+    conflicts = _conflicted_paths(cfg) if proc is not None else []
     git(cfg, ["rebase", "--abort"], cfg.home, 5)
     if conflicts:
         return f"mind: sync conflict in {', '.join(conflicts)}, resolve by hand in {cfg.home}"
-    return f"mind: offline, using cached copy from {_head_date(cfg)}"
+    return _pull_failure_message(cfg, proc)
 
 
 def _rebase_onto_upstream(cfg: Config) -> str | None:
@@ -291,7 +313,7 @@ def _rebase_onto_upstream(cfg: Config) -> str | None:
     except subprocess.TimeoutExpired:
         proc = None
     if proc is None or proc.returncode != 0:
-        return _rebase_failure_message(cfg, ran=proc is not None)
+        return _rebase_failure_message(cfg, proc)
     return None
 
 
