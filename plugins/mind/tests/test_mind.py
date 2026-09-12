@@ -77,6 +77,37 @@ def test_parse_frontmatter_lists():
     assert meta["stack"] == []
 
 
+def test_parse_frontmatter_only_parses_lists_for_stack_aliases_related(tmp_path):
+    """A title, supersedes ID, or source string that happens to look like a
+    YAML list (e.g. `title: [WIP]`) must stay a plain string: only stack,
+    aliases, and related are ever list fields."""
+    meta, _ = mind.parse_frontmatter(
+        "---\ntitle: [WIP]\nsupersedes: [PREF-REV-001]\nstack: [python]\naliases: [a]\nrelated: [b]\n---\n")
+    assert meta["title"] == "[WIP]"
+    assert meta["supersedes"] == "[PREF-REV-001]"
+    assert meta["stack"] == ["python"]
+    assert meta["aliases"] == ["a"]
+    assert meta["related"] == ["b"]
+
+
+def test_validate_meta_rejects_non_string_title():
+    errs = mind.validate_meta({"title": ["WIP"], "type": "gotcha", "stage": "deployment", "strength": "should"})
+    assert errs == ["title must be a string"]
+
+
+def test_cmd_add_handles_bracketed_title_as_a_plain_string_not_a_crash(repo, tmp_path):
+    """title is no longer a list field: `[WIP]` stays the literal string
+    title instead of reaching _kebab() as a list and crashing on .lower()."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    draft = tmp_path / "d.md"
+    draft.write_text("---\ntitle: [WIP]\ntype: gotcha\nstage: deployment\nstrength: should\n---\nb\n")
+    out = mind.cmd_add(cfg, draft, "global", None, tmp_path)
+    assert out == "mind: added GOT-DEPLOY-001 (global), pushed"
+    meta, _ = mind.parse_frontmatter(next(mind.global_notes_dir(cfg).glob("GOT-DEPLOY-001-*.md")).read_text())
+    assert meta["title"] == "[WIP]"
+
+
 def test_parse_frontmatter_missing_returns_empty_meta():
     assert mind.parse_frontmatter("just text\n") == ({}, "just text\n")
 

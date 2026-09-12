@@ -27,11 +27,14 @@ KNOWN = REQUIRED + ["id", "scope", "status", "affirmed", "supersedes", "source"]
 ENUMS = {"type": TYPES, "stage": STAGES, "strength": STRENGTHS, "status": STATUSES}
 
 
-def _parse_value(raw: str):
+LIST_FIELDS = {"stack", "aliases", "related"}
+
+
+def _parse_value(key: str, raw: str):
     raw = raw.strip()
     if raw in ("null", "~", ""):
         return None
-    if raw.startswith("[") and raw.endswith("]"):
+    if key in LIST_FIELDS and raw.startswith("[") and raw.endswith("]"):
         inner = raw[1:-1].strip()
         return [v.strip() for v in inner.split(",")] if inner else []
     return raw
@@ -56,7 +59,8 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
         if ":" not in line:
             continue
         key, _, raw = line.partition(":")
-        meta[key.strip()] = _parse_value(raw)
+        key = key.strip()
+        meta[key] = _parse_value(key, raw)
     return meta, text[end + 5:]
 
 
@@ -72,6 +76,8 @@ def validate_meta(meta: dict) -> list[str]:
             errs.append(f"missing required field: {key}")
         elif key in ENUMS and meta[key] not in ENUMS[key]:
             errs.append(f"{key} must be one of: " + ", ".join(ENUMS[key]))
+        elif key == "title" and not isinstance(meta[key], str):
+            errs.append("title must be a string")
     if "status" in meta and meta["status"] not in STATUSES:
         errs.append("status must be one of: " + ", ".join(STATUSES))
     for key in meta:
