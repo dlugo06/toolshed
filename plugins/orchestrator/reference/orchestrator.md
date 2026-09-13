@@ -32,7 +32,7 @@ If a project section starts with `DUPLICATE IDS`, stop for that project. Report 
 
 ## Consult the mind
 
-The `mind` plugin (installed side by side: `MIND="$(dirname "$CLAUDE_PLUGIN_ROOT")/mind/scripts/mind.py"`) holds the owner's stated preferences. When that path is absent, run `claude plugin list`: if `mind` is listed, set `MIND` to `scripts/mind.py` under its listed install path and continue; if `mind` is not listed, the mind is not installed — every consult below is skipped and the report says `Mind: not installed`; nothing else changes. The orchestrator is inert on mind consults, not blocked, in either not-installed case.
+The `mind` plugin (installed side by side: `MIND="$(dirname "$CLAUDE_PLUGIN_ROOT")/mind/scripts/mind.py"`) holds the owner's stated preferences. When the sibling path is absent, use `$MIND_SCRIPT` if the owner exported it; when neither exists, the mind is not installed: skip every consult and report `Mind: not installed`; nothing else changes. The orchestrator is inert on mind consults, not blocked, in either not-installed case.
 
 The rule for every ruling the orchestrator makes on the owner's behalf: **decide, cite, or propose**.
 
@@ -40,12 +40,13 @@ The rule for every ruling the orchestrator makes on the owner's behalf: **decide
 - Before deciding, run `python3 "$MIND" ask --project <slug> <terms>` with the terms in the table below. A note that settles the matter is applied and cited as `[per <ID>]` on the ruling line.
 - With no settling note, decide anyway and mark the ruling `[provisional]`.
 - At the end of the transition, every provisional ruling becomes a note: draft it as one markdown file per note in the session scratch directory, frontmatter `title`, `type`, `stage`, `strength`, `source: orchestrator ruling <project>/<item> <date>` (and `scope: project:<slug>` for a project fact — omit `id`, which `propose` assigns), a one- or two-sentence body plus `**Why:**` and `**How to apply:**`; scope by "true in another repository". One draft per ruling, batched into a single pull request on the data repo: `python3 "$MIND" propose <drafts...> --topic <project>-<item>-<stage> [--scope project --project <slug>]`. The PR URL goes on the progress line and in the report.
-- A statement the owner makes during the run ("from now on", "never", "always", a direct answer) is not provisional: it goes through `python3 "$MIND" add --project <slug>` at once and is cited from then on.
+- A statement the owner makes during the run ("from now on", "never", "always", a direct answer) is not provisional: draft the note as a file in the scratch directory (same frontmatter as a proposal draft), run `python3 "$MIND" ask <terms> --project <slug>` first to catch a duplicate or a note to supersede, then `python3 "$MIND" add <file> --scope global` or `--scope project --project <slug>`; cite the returned ID from then on.
 - A ruling that would change the effect of a `must` note is never made provisionally. Apply the note; if it seems wrong, record `blocked_reason` and stop. Only a `must` note blocks a provisional ruling — `should`, `default`, `optional`, and unstated matters may all be ruled provisionally.
 
 | transition | ask terms | what the answer governs |
 |---|---|---|
 | idea -> specced | `tier <subsystem words>`; `decision <subsystem words>` | the tier; prior decisions the spec must honour |
+| specced -> impact_checked | `behaviour register impact <surface words>` | rulings on impact-check conflicts |
 | impact_checked -> tests_planned | `scenario defensive critical` | rulings on test-plan flags |
 | tests_planned -> implementing | `implementer brief tests` | brief wording and the test bound |
 | implementing -> evaluated | `review ruling <finding words>` | rulings on whole-branch and review-tests findings |
