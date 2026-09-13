@@ -1469,8 +1469,20 @@ def _normalize_repo_url(url: str) -> str:
     return normalized[: -len(".git")] if normalized.endswith(".git") else normalized
 
 
+def _sanitize_for_report(text: str, limit: int = 200) -> str:
+    """A value that reached this point from git output (an origin URL) can
+    itself carry embedded whitespace or newlines -- which would forge an
+    extra line into a line-oriented report like doctor's -- or unbounded
+    length. Collapse all whitespace/newlines to single spaces and cap the
+    result, before the caller redacts it."""
+    return " ".join(text.split())[:limit]
+
+
 def _origin_url(cfg: Config) -> str | None:
-    proc = git(cfg, ["remote", "get-url", "origin"], cfg.home, 5)
+    try:
+        proc = git(cfg, ["remote", "get-url", "origin"], cfg.home, 5)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
     if proc.returncode != 0:
         return None
     return proc.stdout.strip() or None
@@ -1551,7 +1563,7 @@ def cmd_doctor(cfg: Config) -> str:
             # reachability below -- the one check a second machine or
             # cloud session runs doctor for must never be skipped just
             # because this checkout's origin points elsewhere.
-            lines.append(f"remote: origin {_redact(origin, cfg)} does not match MIND_REPO")
+            lines.append(f"remote: origin {_redact(_sanitize_for_report(origin), cfg)} does not match MIND_REPO")
         reachable, info = _remote_reachable(cfg)
         lines.append(f"remote: reachable ({info} ms)" if reachable else f"remote: unreachable ({_redact(str(info), cfg)})")
     email = _git_user_email(cfg)

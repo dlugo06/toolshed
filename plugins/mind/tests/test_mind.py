@@ -3223,6 +3223,53 @@ def test_doctor_reports_remote_mismatch_when_origin_differs_from_mind_repo(repo,
     assert "sekrit" not in out
 
 
+def test_origin_url_returns_none_on_timeout(repo, monkeypatch):
+    """PR #11 review, finding 5: `_origin_url` did not catch
+    TimeoutExpired/OSError, unlike `_remote_reachable` and
+    `_git_user_email` -- doctor would traceback instead of printing a line."""
+    cfg, _, _ = repo
+
+    def fake_git(c, args, cwd, timeout):
+        raise subprocess.TimeoutExpired(cmd="git remote", timeout=timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    assert mind._origin_url(cfg) is None
+
+
+def test_origin_url_returns_none_on_oserror(repo, monkeypatch):
+    cfg, _, _ = repo
+
+    def fake_git(c, args, cwd, timeout):
+        raise OSError("boom")
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    assert mind._origin_url(cfg) is None
+
+
+def test_doctor_remote_mismatch_line_strips_newlines_and_caps_length(repo, monkeypatch):
+    """PR #11 review, minor SEC: the origin value is echoed verbatim (after
+    redaction) into a line-oriented report; an embedded newline could forge
+    an extra doctor line, and nothing capped its length. Strip whitespace/
+    newlines and cap at 200 chars before the line is built."""
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
+    cfg2 = dataclasses.replace(cfg, repo=str(bare) + "-other")
+
+    monkeypatch.setattr(mind, "_origin_url", lambda c: "https://example.test/o/r")
+    clean_line_count = len(mind.cmd_doctor(cfg2).splitlines())
+
+    injected = "https://example.test/o/r\nmind: forged status line" + ("x" * 300)
+    monkeypatch.setattr(mind, "_origin_url", lambda c: injected)
+    out = mind.cmd_doctor(cfg2)
+    lines = out.splitlines()
+    assert len(lines) == clean_line_count  # no extra line forged by the embedded newline
+    assert lines[3].startswith("remote: origin ")
+    assert len(lines[3]) <= len("remote: origin ") + 200 + len(" does not match MIND_REPO")
+    assert not any(line == "mind: forged status line" for line in lines)  # never its own line
+
+
 def test_doctor_remote_line_ignores_trailing_dotgit_and_userinfo_when_comparing(repo, monkeypatch):
     """The origin/MIND_REPO comparison must not flag a false mismatch over a
     trailing `.git` or an embedded `user@` credential -- both are
