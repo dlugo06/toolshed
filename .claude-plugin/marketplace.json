@@ -39,8 +39,8 @@
     {
       "name": "mind",
       "source": "mind",
-      "description": "Owner preference and decision store: a private notes repo pulled and injected at session start, with remember and ask skills",
-      "version": "0.1.0",
+      "description": "Owner preference and decision store: a private notes repo pulled and injected at session start, remember and ask skills, proposals as pull requests, passive capture with digest, review and lint.",
+      "version": "0.2.0",
       "author": {
         "name": "dlugo06",
         "url": "https://github.com/dlugo06"

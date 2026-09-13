@@ -5,30 +5,32 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
+import json
 import os
 import re
 import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-USAGE = "usage: mind.py {inject,add,ask,reindex,accept,sync,init} ..."
+USAGE = "usage: mind.py {inject,add,propose,proposals,ask,pending,stale,affirm,retire,lint,settings,doctor,reindex,accept,sync,init} ..."
 
-TYPES = ["principle", "preference", "decision", "procedure", "gotcha", "reference"]
+TYPES = ["principle", "preference", "decision", "procedure", "gotcha", "reference", "precedence"]
 STAGES = ["identity", "product", "planning", "development", "testing", "review",
           "release", "deployment", "monitoring", "security"]
 STRENGTHS = ["must", "should", "default", "optional"]
 STATUSES = ["draft", "accepted", "superseded", "deprecated"]
-TYPE_CODES = dict(zip(TYPES, ["PRIN", "PREF", "DEC", "PROC", "GOT", "REF"]))
+TYPE_CODES = dict(zip(TYPES, ["PRIN", "PREF", "DEC", "PROC", "GOT", "REF", "PREC"]))
 STAGE_CODES = dict(zip(STAGES, ["ID", "PROD", "PLAN", "DEV", "TEST", "REV",
                                 "REL", "DEPLOY", "MON", "SEC"]))
 REQUIRED = ["title", "type", "stage", "strength"]
-KNOWN = REQUIRED + ["id", "scope", "status", "affirmed", "supersedes", "source"]
+KNOWN = REQUIRED + ["id", "scope", "status", "affirmed", "supersedes", "source", "refers"]
 ENUMS = {"type": TYPES, "stage": STAGES, "strength": STRENGTHS, "status": STATUSES}
 
 
-LIST_FIELDS = {"stack", "aliases", "related"}
+LIST_FIELDS = {"stack", "aliases", "related", "refers"}
 
 
 def _parse_value(key: str, raw: str):
@@ -172,11 +174,12 @@ class Config:
     env: dict = dataclasses.field(default_factory=lambda: os.environ)
 
     @classmethod
-    def from_env(cls, env, cwd: Path) -> "Config":
-        repo = env.get("MIND_REPO")
-        if not repo:
+    def from_env(cls, env, cwd: Path, *, require_repo: bool = True) -> "Config":
+        repo = env.get("MIND_REPO") or ""
+        if require_repo and not repo:
             raise ConfigError("MIND_REPO is not set")
-        _validate_repo_url(repo)
+        if repo:
+            _validate_repo_url(repo)
         if env.get("MIND_HOME"):
             home = Path(env["MIND_HOME"])
         elif env.get("CLAUDE_PLUGIN_DATA"):
@@ -187,8 +190,11 @@ class Config:
 
 
 def _has_configured_identity(cfg: Config) -> bool:
-    """True when git already has a usable user.email, from any config file."""
-    cwd = cfg.home if (cfg.home / ".git").is_dir() else None
+    """True when git already has a usable user.email, from any config file.
+    `.git` is a FILE (not a directory) inside a linked worktree, so check
+    `.exists()`, not `.is_dir()`, or a proposal's worktree commit would miss
+    an identity configured only in the data repo's own `.git/config`."""
+    cwd = cfg.home if (cfg.home / ".git").exists() else None
     try:
         proc = subprocess.run(["git", "config", "user.email"], cwd=cwd, env=dict(cfg.env),
                               capture_output=True, text=True, timeout=5)
@@ -247,9 +253,10 @@ def _head_date(cfg: Config) -> str:
     return out.stdout.strip() or "unknown"
 
 
-_OFFLINE_RE = re.compile(
-    r"Could not resolve|Connection|timed out|Permission denied|Authentication|publickey",
-    re.IGNORECASE,
+_OFFLINE_RE = re.compile(r"Could not resolve|Connection|timed out", re.IGNORECASE)
+
+_AUTH_FAILURE_RE = re.compile(
+    r"Permission denied|Authentication|publickey|could not read Username", re.IGNORECASE,
 )
 
 
@@ -257,15 +264,19 @@ def _pull_failure_message(cfg: Config, proc: subprocess.CompletedProcess | None)
     """Classify why a pull (or pull --rebase) failed. `proc` is None on a
     timeout. Order: no upstream at all (a brand-new empty data repo, nothing
     to pull yet) beats every other reading; a timeout or stderr naming a
-    network/auth problem is offline; anything else (diverged, dirty tree,
-    corrupt repo) is a sync block the owner must act on, not a transient
-    offline blip."""
+    network problem is offline; stderr naming an authentication problem (a
+    revoked token, a wrong deploy key) is a sync block that says so
+    specifically -- the owner would otherwise wait for connectivity that is
+    not the problem; anything else (diverged, dirty tree, corrupt repo) is
+    a sync block the owner must act on, not a transient offline blip."""
     if not _has_upstream(cfg):
         return "mind: first run, nothing to pull yet"
     if proc is None or _OFFLINE_RE.search(proc.stderr or ""):
         return f"mind: offline, using cached copy from {_head_date(cfg)}"
     lines = (proc.stderr or "").strip().splitlines()
     last = lines[-1] if lines else "unknown error"
+    if _AUTH_FAILURE_RE.search(proc.stderr or ""):
+        return f"mind: sync blocked: authentication failed ({last})"
     return f"mind: sync blocked: {last}"
 
 
@@ -275,10 +286,52 @@ _CREDENTIAL_URL_RE = re.compile(r"://[^@/]+@")
 def _redact(text: str, cfg: Config | None = None) -> str:
     """Strip a userinfo-embedded credential (https://x-access-token:TOK@...,
     a natural alternative to MIND_TOKEN) from any git stderr or exception
-    text before it reaches stdout, plus the literal token value if known."""
+    text before it reaches stdout, plus the literal token value if known,
+    plus every other credential shape _mask_credential_shapes knows about
+    (doctor's `remote:` line and propose's worktree/push errors echo git/gh
+    stderr verbatim, which can carry a bare token string)."""
     text = _CREDENTIAL_URL_RE.sub("://***@", text)
     if cfg and cfg.token:
         text = text.replace(cfg.token, "***")
+    return _mask_credential_shapes(text)
+
+
+_CREDENTIAL_SHAPE_RES = [
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"gh[oprsu]_[A-Za-z0-9]{20,}"),
+    re.compile(r"ghp_[A-Za-z0-9]{36}"),
+    re.compile(r"sk-ant-[A-Za-z0-9_-]+"),
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"AIza[0-9A-Za-z_-]{30,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"ASIA[0-9A-Z]{16}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
+]
+
+# A 40-char base64-ish token (the shape of an AWS secret access key) is too
+# generic to mask everywhere -- only on a line that also names an AKIA
+# access key id or the literal "aws_secret" marker, since that pairing is
+# what an AWS credential block actually looks like.
+_AWS_SECRET_MARKER_RE = re.compile(r"AKIA|aws_secret")
+_AWS_SECRET_SHAPE_RE = re.compile(r"[A-Za-z0-9/+]{40}")
+
+
+def _mask_credential_shapes(text: str) -> str:
+    """A captured prompt can carry a pasted secret with nothing else ever
+    scrubbing it out of the pending file: mask the common credential shapes
+    before writing, same URL pattern `_redact` uses for git/gh output."""
+    text = _CREDENTIAL_URL_RE.sub("://***@", text)
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        # Before the AKIA-id pattern below runs: once that replaces the id
+        # with "***", the marker this line-scoped rule looks for is gone.
+        if _AWS_SECRET_MARKER_RE.search(line):
+            lines[i] = _AWS_SECRET_SHAPE_RE.sub("***", line)
+    text = "\n".join(lines)
+    for pattern in _CREDENTIAL_SHAPE_RES:
+        text = pattern.sub("***", text)
     return text
 
 
@@ -352,6 +405,13 @@ def _has_upstream(cfg: Config) -> bool:
     return proc.returncode == 0
 
 
+def _main_tracks_origin_main(cfg: Config) -> bool:
+    """Specifically main's own upstream, not whatever branch happens to be
+    checked out in cfg.home (`doctor`'s printed claim is about `main`)."""
+    proc = git(cfg, ["rev-parse", "--abbrev-ref", "main@{u}"], cfg.home, 5)
+    return proc.returncode == 0 and proc.stdout.strip() == "origin/main"
+
+
 def _has_head(cfg: Config) -> bool:
     proc = git(cfg, ["rev-parse", "--verify", "-q", "HEAD"], cfg.home, 5)
     return proc.returncode == 0
@@ -366,14 +426,21 @@ def _ahead(cfg: Config) -> bool:
     return proc.returncode == 0 and proc.stdout.strip() not in ("", "0")
 
 
+_PUSH_FAILED_MSG = "mind: push failed, note is committed locally; it will push on the next remember or session start"
+
+
 def push(cfg: Config) -> str | None:
     args = ["push", "-q"] if _has_upstream(cfg) else ["push", "-q", "-u", "origin", "HEAD"]
     try:
         proc = git(cfg, args, cfg.home, GIT_TIMEOUTS["push"])
     except subprocess.TimeoutExpired:
-        return "mind: push failed, note is committed locally; it will push on the next remember or session start"
+        # No stderr is available for a timeout (the process is killed
+        # before it can report anything useful); the plain message stands.
+        return _PUSH_FAILED_MSG
     if proc.returncode != 0:
-        return "mind: push failed, note is committed locally; it will push on the next remember or session start"
+        lines = (proc.stderr or "").strip().splitlines()
+        last = lines[-1] if lines else "unknown error"
+        return f"{_PUSH_FAILED_MSG}: {_redact(last, cfg)}"
     return None
 
 
@@ -501,12 +568,18 @@ def match_project(cfg: Config, candidate: str) -> str | None:
     return None
 
 
-def next_id(notes_dir: Path, note_type: str, stage: str) -> str:
+def next_id(notes_dir: Path, note_type: str, stage: str, taken: frozenset[str] = frozenset()) -> str:
+    """`taken` is extra IDs to treat as already claimed even though they are
+    not (yet) files in `notes_dir` -- IDs a sibling unmerged propose/* branch
+    already assigned in the same notes directory."""
     prefix = f"{TYPE_CODES[note_type]}-{STAGE_CODES[stage]}-"
     highest = 0
     for note in load_notes(notes_dir):
         if note.id.startswith(prefix) and note.id[len(prefix):].isdigit():
             highest = max(highest, int(note.id[len(prefix):]))
+    for note_id in taken:
+        if note_id.startswith(prefix) and note_id[len(prefix):].isdigit():
+            highest = max(highest, int(note_id[len(prefix):]))
     return f"{prefix}{highest + 1:03d}"
 
 
@@ -609,9 +682,12 @@ def _ensure_project(cfg: Config, slug: str) -> bool:
     return True
 
 
-def _write_note(cfg: Config, notes_dir: Path, meta: dict, body: str) -> Path:
-    meta["id"] = next_id(notes_dir, meta["type"], meta["stage"])
-    ordered = {k: meta.get(k) for k in ["id", "title", "type", "stage", "scope", "strength", "status", "affirmed", "supersedes", "source"]}
+def _write_note(cfg: Config, notes_dir: Path, meta: dict, body: str, taken: frozenset[str] = frozenset()) -> Path:
+    meta["id"] = next_id(notes_dir, meta["type"], meta["stage"], taken)
+    fields = ["id", "title", "type", "stage", "scope", "strength", "status", "affirmed", "supersedes", "source"]
+    if "refers" in meta:
+        fields.append("refers")
+    ordered = {k: meta.get(k) for k in fields}
     path = notes_dir / f"{ordered['id']}-{_kebab(ordered['title'])}.md"
     path.write_text(render_frontmatter(ordered, body), encoding="utf-8")
     return path
@@ -718,6 +794,442 @@ def cmd_accept(cfg: Config, note_id: str) -> str:
     return f"mind: accepted {note_id}, " + (msg or "pushed")
 
 
+def _gh(cfg: Config, args: list[str], cwd: Path, timeout: float = 20) -> subprocess.CompletedProcess | None:
+    """gh, never through a shell. None only when gh is not installed (or
+    OSError'd trying to run it); a timeout returns a CompletedProcess with
+    returncode 124 and stderr "timed out" instead of None, so a caller (and
+    doctor) can tell "hung" apart from "missing" and from "present but
+    genuinely erroring", which None used to conflate."""
+    if shutil.which("gh") is None:
+        return None
+    env = {k: v for k, v in cfg.env.items() if k != "MIND_TOKEN"}
+    # `gh auth status` (and others) can prompt for a browser on some gh
+    # versions; every call here must be non-interactive.
+    env["GH_PROMPT_DISABLED"] = "1"
+    try:
+        return subprocess.run(["gh", *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(["gh", *args], 124, "", "timed out")
+    except OSError:
+        return None
+
+
+def _worktree_path(cfg: Config, branch: str) -> Path:
+    return cfg.home.parent / ("worktree-" + branch.replace("/", "-"))
+
+
+_FILENAME_ID_RE = re.compile(r"^([A-Z]+-[A-Z]+-\d{3})-")
+
+
+def _sibling_proposal_ids(cfg: Config, own_branch: str, rel_dir: str) -> frozenset[str]:
+    """IDs already claimed in `rel_dir` (e.g. "global/notes") by *other*
+    unmerged propose/* branches: two same-day proposals from different
+    topics (a digest and a revise-<ID>) both starting from origin/main must
+    never assign the same next ID. Scans remote propose/* branches (the
+    common case) plus local-only ones (a prior batch whose push failed, so
+    it never reached the remote and would otherwise be invisible here) --
+    a branch present in both is only scanned once, from the remote. Both
+    listings' returncodes are checked: a failed `branch` call contributes
+    no IDs rather than raising."""
+    ids: set[str] = set()
+    refs: list[str] = []
+    remote = git(cfg, ["branch", "-r", "--list", "origin/propose/*", "--format=%(refname:short)"], cfg.home, 5)
+    remote_short: set[str] = set()
+    if remote.returncode == 0:
+        for ref in remote.stdout.split():
+            if not ref or ref == f"origin/{own_branch}":
+                continue
+            refs.append(ref)
+            remote_short.add(ref.removeprefix("origin/"))
+    local = git(cfg, ["branch", "--list", "propose/*", "--format=%(refname:short)"], cfg.home, 5)
+    if local.returncode == 0:
+        for ref in local.stdout.split():
+            if not ref or ref == own_branch or ref in remote_short:
+                continue
+            refs.append(ref)
+    for ref in refs:
+        listing = git(cfg, ["ls-tree", "-r", "--name-only", ref, "--", "global/notes", "projects"], cfg.home, 10)
+        if listing.returncode != 0:
+            continue
+        for path in listing.stdout.splitlines():
+            if "/" not in path:
+                continue
+            parent, name = path.rsplit("/", 1)
+            if parent != rel_dir:
+                continue
+            m = _FILENAME_ID_RE.match(name)
+            if m:
+                ids.add(m.group(1))
+    return frozenset(ids)
+
+
+def _proposal_body(rows: list[tuple[str, "Note"]], cwd_slug: str) -> str:
+    out = []
+    for prefix, n in rows:
+        out.append(f"- {prefix}{n.id} | {n.title} | {n.meta.get('scope')} | {n.strength}\n  {n.first_paragraph}\n")
+    out.append(f"\nSource: session {_today()}, {cwd_slug}\n")
+    return "".join(out)
+
+
+def _remove_worktree(cfg: Config, wt: Path) -> str | None:
+    """Remove the temporary proposal worktree and prune, tolerating a slow
+    or failing git rather than raising: a hung/failed removal here must
+    never mask a result the caller already computed (a success replaced by
+    an uncaught traceback, worse than the stale worktree itself), and a
+    returncode failure must be visible instead of silently leaving `wt`
+    behind. Returns a suffix to append to the caller's message, or None."""
+    ok = True
+    try:
+        remove_proc = git(cfg, ["worktree", "remove", "--force", "--", str(wt)], cfg.home, 20)
+        ok = remove_proc.returncode == 0
+    except subprocess.TimeoutExpired:
+        ok = False
+    try:
+        prune_proc = git(cfg, ["worktree", "prune"], cfg.home, 10)
+        ok = ok and prune_proc.returncode == 0
+    except subprocess.TimeoutExpired:
+        ok = False
+    return None if ok else f"; worktree cleanup failed, remove {wt} by hand"
+
+
+def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project: str | None,
+                body: Path | None, cwd: Path) -> str:
+    """Write proposals in a temporary git worktree of the data repo, never in
+    the shared checkout: a concurrent inject/ask/add on cfg.home must never
+    see an unmerged proposal branch as accepted notes, and cfg.home never
+    leaves main."""
+    parsed = []
+    for d in drafts:
+        meta, text = parse_frontmatter(d.read_text(encoding="utf-8"))
+        draft_scope = meta.pop("scope", None)
+        errs = validate_meta(meta)
+        if errs:
+            raise ValidationError(f"{d.name}: " + "; ".join(errs))
+        if draft_scope and draft_scope != "global" and not draft_scope.startswith("project:"):
+            # An unrecognised value must reject the draft, not silently fall
+            # back to the command's own --scope/--project flags.
+            raise ValidationError(f"{d.name}: unrecognised scope: {draft_scope!r}")
+        sup = meta.get("supersedes")
+        if sup and _find_note(cfg, sup) is None:
+            # Before the worktree even exists: a dangling `supersedes` must
+            # reject the whole batch, not silently no-op and open a PR the
+            # owner reviews with the old note still `accepted` (lint only
+            # catches it later).
+            raise ValidationError(f"{d.name}: supersedes {sup} not found")
+        parsed.append((d, meta, text, draft_scope))
+    topic_slug = _slugify(topic)
+    _validate_slug(topic_slug)
+    branch = f"propose/{_today()}-{topic_slug}"
+    fetch_warning = None
+    try:
+        fetch_proc = git(cfg, ["fetch", "-q", "origin"], cfg.home, GIT_TIMEOUTS["pull"])
+        if fetch_proc.returncode != 0:
+            # A reachable-but-erroring remote (as opposed to a timeout):
+            # proceed from whatever origin/main the local checkout already
+            # has, same as the timeout case, but say so in the result.
+            fetch_warning = "mind: fetch failed, proposing from the local copy"
+    except subprocess.TimeoutExpired:
+        # Offline: proceed from whatever origin/main the local checkout
+        # already has; the PR gets rebased on merge if it moved meanwhile.
+        pass
+
+    def _prefixed(msg: str) -> str:
+        return f"{fetch_warning}; {msg}" if fetch_warning else msg
+    wt = _worktree_path(cfg, branch)
+    remote_has = git(cfg, ["rev-parse", "--verify", "-q", f"origin/{branch}"], cfg.home, 5).returncode == 0
+    local_has = git(cfg, ["rev-parse", "--verify", "-q", f"refs/heads/{branch}"], cfg.home, 5).returncode == 0
+    # Order matters: a retry after a failed push (branch committed locally,
+    # never reached the remote) must append to that same local branch, not
+    # die on `worktree add -b` because the branch already exists.
+    if remote_has:
+        # -B (not a detached add + a separate checkout -B) resets the local
+        # branch onto origin/<branch> atomically: a two-step version left
+        # commits on a detached HEAD with the checkout's returncode ignored
+        # whenever the second step failed.
+        add_args = ["worktree", "add", "-q", "-B", branch, "--", str(wt), f"origin/{branch}"]
+    elif local_has:
+        add_args = ["worktree", "add", "-q", "--", str(wt), branch]
+    else:
+        start = "HEAD" if not _has_upstream(cfg) else "origin/main"
+        add_args = ["worktree", "add", "-q", "-b", branch, "--", str(wt), start]
+    proc = git(cfg, add_args, cfg.home, 20)
+    if proc.returncode != 0:
+        raise ValidationError("worktree failed: " + _redact((proc.stderr.strip().splitlines() or ["unknown"])[-1], cfg))
+    wcfg = dataclasses.replace(cfg, home=wt)
+
+    def _write_and_open_pr() -> str:
+        rows: list[tuple[str, Note]] = []
+        for d, meta, text, draft_scope in parsed:
+            eff_scope, eff_project = scope, project
+            if draft_scope == "global":
+                eff_scope = "global"
+            elif draft_scope and draft_scope.startswith("project:"):
+                eff_scope, eff_project = "project", draft_scope.split(":", 1)[1]
+            if eff_scope == "global":
+                notes_dir, prefix, scope_value = global_notes_dir(wcfg), "", "global"
+            else:
+                candidate = _slugify(eff_project) if eff_project else resolve_candidate(cfg, cwd)
+                _validate_slug(candidate)
+                slug = match_project(wcfg, candidate) or candidate
+                _ensure_project(wcfg, slug)
+                notes_dir, prefix, scope_value = project_notes_dir(wcfg, slug), f"{slug}/", f"project:{slug}"
+            notes_dir.mkdir(parents=True, exist_ok=True)
+            meta.setdefault("status", "accepted")
+            meta.setdefault("affirmed", _today())
+            meta.setdefault("supersedes", None)
+            meta.setdefault("source", f"proposal {_today()}, {resolve_candidate(cfg, cwd)}")
+            meta["scope"] = scope_value
+            rel_dir = notes_dir.relative_to(wt).as_posix()
+            taken = _sibling_proposal_ids(cfg, branch, rel_dir)
+            path = _write_note(wcfg, notes_dir, meta, text, taken)
+            old = _find_note(wcfg, meta["supersedes"]) if meta.get("supersedes") else None
+            if old is not None:
+                old.meta["status"] = "superseded"
+                old.path.write_text(render_frontmatter(old.meta, old.body), encoding="utf-8")
+            _require_commit(commit_all(wcfg, f"mind: propose {meta['id']} {meta['title']}"))
+            rows.append((prefix, Note(path, *parse_frontmatter(path.read_text(encoding="utf-8")))))
+        try:
+            push_proc = git(wcfg, ["push", "-q", "-u", "origin", branch], wt, GIT_TIMEOUTS["push"])
+        except subprocess.TimeoutExpired:
+            return _prefixed(f"mind: proposal branch {branch} is committed locally; push failed")
+        if push_proc.returncode != 0:
+            return _prefixed(f"mind: proposal branch {branch} is committed locally; push failed")
+        n = len(rows)
+        noun = "note" if n == 1 else "notes"
+        body_file = body or (cfg.home.parent / f"proposal-{topic_slug}.md")
+        if body is None:
+            body_file.write_text(_proposal_body(rows, resolve_candidate(cfg, cwd)), encoding="utf-8")
+        listing = _gh(cfg, ["pr", "list", "--head", branch, "--json", "url"], cfg.home)
+        if listing is None:
+            return _prefixed(f"mind: proposed {n} {noun} on {branch}, open the PR by hand")
+        try:
+            found = json.loads(listing.stdout or "[]")
+        except json.JSONDecodeError:
+            found = []
+        if found:
+            url = found[0].get("url", "")
+        else:
+            created = _gh(cfg, ["pr", "create", "--base", "main", "--head", branch, "--title",
+                                f"mind: {topic} ({n} {noun})", "--body-file", str(body_file)], cfg.home)
+            if created is None or created.returncode != 0:
+                return _prefixed(f"mind: proposed {n} {noun} on {branch}, open the PR by hand")
+            url = created.stdout.strip().splitlines()[-1]
+        return _prefixed(f"mind: proposed {n} {noun} on {branch}, PR {_redact(url, cfg)}")
+
+    cleanup_warning = None
+    try:
+        result = _write_and_open_pr()
+    finally:
+        if body is None:
+            # Only the body file this call generated itself, never one the
+            # caller supplied with --body.
+            (cfg.home.parent / f"proposal-{topic_slug}.md").unlink(missing_ok=True)
+        # A stuck or failing removal must never raise past this finally:
+        # that would replace an already-successful result (rows written,
+        # branch pushed, PR opened) with an uncaught traceback, and hide a
+        # returncode failure with no line printed at all, leaving a stale
+        # worktree behind silently.
+        cleanup_warning = _remove_worktree(cfg, wt)
+    if cleanup_warning:
+        result += cleanup_warning
+    return result
+
+
+def _default_branch(cfg: Config) -> str:
+    """The data repo's default branch, from origin's HEAD symref (set at
+    clone time, or by `git remote set-head`); falls back to "main" when
+    that symref is unresolvable. 0.1.0/0.2.0 hardcoded "main" everywhere,
+    which broke on any data repo whose default branch is named
+    differently."""
+    proc = git(cfg, ["symbolic-ref", "-q", "refs/remotes/origin/HEAD"], cfg.home, 5)
+    if proc.returncode == 0:
+        prefix = "refs/remotes/origin/"
+        ref = proc.stdout.strip()
+        if ref.startswith(prefix) and ref[len(prefix):]:
+            return ref[len(prefix):]
+    return "main"
+
+
+def _open_pr_urls(cfg: Config) -> dict[str, str]:
+    urls: dict[str, str] = {}
+    listing = _gh(cfg, ["pr", "list", "--state", "open", "--limit", "100", "--json", "headRefName,url"],
+                  cfg.home, timeout=10)
+    if listing is not None and listing.returncode == 0:
+        try:
+            for row in json.loads(listing.stdout or "[]"):
+                urls[row.get("headRefName", "")] = row.get("url", "")
+        except json.JSONDecodeError:
+            pass
+    return urls
+
+
+def _proposals(cfg: Config) -> tuple[list[tuple[str, str]], str | None]:
+    """Remote proposal branches not yet merged into origin/<default>, with
+    their PR URL, plus local propose/* branches that never reached the
+    remote (a failed push), marked "(unpushed)" so a stuck proposal is
+    visible to the owner. A merged proposal (the PR landed, whether or not
+    GitHub or the owner deleted the remote branch) must stop nagging
+    forever: `--no-merged origin/<default>` drops it from both lists, and a
+    merged local branch (the worktree's `remove` never deletes the branch
+    it created) is deleted with `branch -d`, safe by definition.
+
+    Returns (rows, warning): warning is set when origin/<default> itself is
+    absent (a brand-new data repo, a pruned ref, an unfetched clone) --
+    every --merged/--no-merged query above would otherwise exit non-zero
+    with empty stdout and silently report zero proposals. In that case rows
+    falls back to every propose/* branch, unfiltered by merge state."""
+    try:
+        git(cfg, ["fetch", "-q", "--prune"], cfg.home, GIT_TIMEOUTS["pull"])
+    except subprocess.TimeoutExpired:
+        # Offline: fall through and report whatever the last fetch left in
+        # the local refs, same "cached copy" contract as sync()/pull().
+        pass
+    default_branch = _default_branch(cfg)
+    origin_default = f"origin/{default_branch}"
+    merged = git(cfg, ["branch", "--list", "propose/*", "--merged", origin_default,
+                       "--format=%(refname:short)"], cfg.home, 5)
+    remote_proc = git(cfg, ["branch", "-r", "--list", "origin/propose/*", "--no-merged", origin_default,
+                     "--format=%(refname:short)"], cfg.home, 5)
+    local_proc = git(cfg, ["branch", "--list", "propose/*", "--no-merged", origin_default,
+                      "--format=%(refname:short)"], cfg.home, 5)
+    if merged.returncode != 0 or remote_proc.returncode != 0 or local_proc.returncode != 0:
+        remote_all = git(cfg, ["branch", "-r", "--list", "origin/propose/*",
+                               "--format=%(refname:short)"], cfg.home, 5)
+        branches = [b.removeprefix("origin/") for b in remote_all.stdout.split() if b]
+        local_all = git(cfg, ["branch", "--list", "propose/*",
+                              "--format=%(refname:short)"], cfg.home, 5)
+        unpushed = [b for b in local_all.stdout.split() if b and b not in branches]
+        urls = _open_pr_urls(cfg)
+        rows = [(b, urls.get(b, "")) for b in branches] + [(b, "(unpushed)") for b in unpushed]
+        return rows, f"mind: proposals unfiltered (no {origin_default})"
+    for b in merged.stdout.split():
+        if b:
+            # Already proven merged into origin/<default> above, so -D
+            # (rather than -d) is still safe here: plain -d's own safety
+            # check is against HEAD or the branch's upstream, and HEAD (the
+            # shared checkout's local main) commonly lags origin/<default>
+            # until the next sync, and the branch's own upstream ref is
+            # typically gone by now (the remote propose/* branch was
+            # deleted on merge).
+            git(cfg, ["branch", "-D", "--", b], cfg.home, 5)
+    branches = [b.removeprefix("origin/") for b in remote_proc.stdout.split() if b]
+    unpushed = [b for b in local_proc.stdout.split() if b and b not in branches]
+    urls = _open_pr_urls(cfg)
+    return [(b, urls.get(b, "")) for b in branches] + [(b, "(unpushed)") for b in unpushed], None
+
+
+def cmd_proposals(cfg: Config) -> list[tuple[str, str]]:
+    return _proposals(cfg)[0]
+
+
+PENDING_CAP = 2 * 1024 * 1024
+
+
+def PENDING_FILE(cfg: Config) -> Path:
+    return Path(cfg.env["MIND_PENDING"]) if cfg.env.get("MIND_PENDING") else cfg.home.parent / "pending.jsonl"
+
+
+def _utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _append_0600(path: Path, text: str) -> None:
+    """Append to `path`, creating it with mode 0o600 (never the default
+    umask, typically 0o644/world-readable) instead of relying on a chmod
+    that might never come; also chmod on every append in case the file
+    predates this fix or something else loosened its mode. Every prompt
+    the owner ever types lands here in clear text (SEC-M1)."""
+    fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+
+
+def cmd_capture(cfg: Config, payload: dict, cwd: Path) -> None:
+    prompt = str(payload.get("prompt") or "").strip()
+    if len(prompt) < 12 or prompt.startswith("/"):
+        return
+    path = PENDING_FILE(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > PENDING_CAP:
+        # Read-modify-write with no lock: two concurrent sessions trimming
+        # at the same moment can drop each other's line. Acceptable for a
+        # best-effort capture log; not worth a lock file for this.
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        path.write_text("".join(lines[len(lines) // 2:]), encoding="utf-8")
+        os.chmod(path, 0o600)
+    cwd_str = str(payload.get("cwd") or cwd)
+    row = {"ts": _utc_now(), "session": str(payload.get("session_id") or ""),
+           "project": resolve_candidate(cfg, Path(cwd_str)), "cwd": cwd_str,
+           "prompt": _mask_credential_shapes(prompt)}
+    _append_0600(path, json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _watermark_file(cfg: Config) -> Path:
+    return PENDING_FILE(cfg).with_name(PENDING_FILE(cfg).name + ".processed")
+
+
+def read_pending(cfg: Config, since: str | None, limit: int) -> list[dict]:
+    path = PENDING_FILE(cfg)
+    if not path.exists():
+        return []
+    if since is None and _watermark_file(cfg).exists():
+        since = _watermark_file(cfg).read_text(encoding="utf-8").strip() or None
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if since and row.get("ts", "") <= since:
+            continue
+        rows.append(row)
+    return rows[:limit]
+
+
+_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+def mark_pending(cfg: Config, ts: str) -> None:
+    if not _TIMESTAMP_RE.fullmatch(ts):
+        # A typo (e.g. "2026-9-12") compares wrongly as a plain string
+        # against the ISO timestamps rows are filtered by, silently
+        # re-surfacing or hiding prompts on the next `pending` read.
+        raise ValidationError(f"invalid timestamp: {ts!r}, expected YYYY-MM-DDTHH:MM:SSZ")
+    _watermark_file(cfg).write_text(ts + "\n", encoding="utf-8")
+
+
+def clear_pending(cfg: Config) -> bool:
+    """Delete every captured-prompt row (which can carry pasted secrets)
+    whose ts is at or before the watermark (<pending file>.processed),
+    keeping the watermark itself and any row a concurrent session appended
+    after it -- the digest skill's own `pending` -> `propose` -> `--mark
+    <last ts>` -> `--clear` sequence must never delete a prompt nobody has
+    mined yet. Returns False (deleting nothing) when there is no watermark
+    at all, rather than truncating every unprocessed prompt."""
+    wm_path = _watermark_file(cfg)
+    if not wm_path.exists():
+        return False
+    watermark = wm_path.read_text(encoding="utf-8").strip()
+    path = PENDING_FILE(cfg)
+    if not path.exists():
+        return True
+    kept = []
+    for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            # Never silently drop a line this run cannot even parse.
+            kept.append(line)
+            continue
+        if row.get("ts", "") > watermark:
+            kept.append(line)
+    path.write_text("".join(kept), encoding="utf-8")
+    return True
+
+
 def _scoped_notes(cfg: Config, all_projects: bool, project: str | None, cwd: Path) -> list[tuple[str, Note]]:
     rows = [("", n) for n in load_notes(global_notes_dir(cfg))]
     if all_projects:
@@ -732,25 +1244,330 @@ def _scoped_notes(cfg: Config, all_projects: bool, project: str | None, cwd: Pat
     return rows
 
 
-def cmd_ask(cfg: Config, terms: list[str], all_projects: bool, project: str | None, drafts: bool, cwd: Path) -> str:
+def _age_days(affirmed: str) -> int:
+    try:
+        return (dt.date.fromisoformat(_today()) - dt.date.fromisoformat(affirmed)).days
+    except ValueError:
+        return 10**6
+
+
+def cmd_stale(cfg: Config, days: int, all_projects: bool, cwd: Path) -> str:
+    rows = []
+    for prefix, n in _scoped_notes(cfg, all_projects, None, cwd):
+        if n.status != "accepted":
+            continue
+        affirmed = n.meta.get("affirmed")
+        if not affirmed:
+            # A null `affirmed` is valid per validate_meta and always older
+            # than any --days threshold; it must sort first, but must never
+            # print as "(1000000 days)".
+            rows.append((10**6, prefix, n, None))
+            continue
+        age = _age_days(str(affirmed))
+        if age > days:
+            rows.append((age, prefix, n, age))
+    if not rows:
+        return "mind: nothing stale"
+    rows.sort(key=lambda r: (-r[0], r[1], r[2].id))
+    out = []
+    for _, prefix, n, age in rows:
+        strength = n.strength + (" (must, no decay)" if n.strength == "must" else "")
+        if age is None:
+            out.append(f"{prefix}{n.id} | {n.title} | {n.meta.get('scope')} | {strength} | none | no affirmed date\n")
+        else:
+            out.append(f"{prefix}{n.id} | {n.title} | {n.meta.get('scope')} | {strength} | {n.meta.get('affirmed')} | {age} days\n")
+    return "".join(out)
+
+
+def _edit_note(cfg: Config, note_id: str, changes: dict, message: str) -> Note:
+    note = _find_note(cfg, note_id)
+    if note is None:
+        raise ValidationError(f"no note with id {note_id}")
+    note.meta.update(changes)
+    note.path.write_text(render_frontmatter(note.meta, note.body), encoding="utf-8")
+    reindex(cfg)
+    _require_commit(commit_all(cfg, message))
+    return note
+
+
+def cmd_affirm(cfg: Config, note_id: str, strength: str | None) -> str:
+    changes = {"affirmed": _today()}
+    if strength:
+        if strength not in STRENGTHS:
+            raise ValidationError("strength must be one of: " + ", ".join(STRENGTHS))
+        changes["strength"] = strength
+    _edit_note(cfg, note_id, changes, f"mind: affirm {note_id}")
+    msg = sync(cfg)
+    suffix = f" (strength {strength})" if strength else ""
+    return f"mind: affirmed {note_id}{suffix}, " + (msg or "pushed")
+
+
+def cmd_retire(cfg: Config, note_id: str) -> str:
+    _edit_note(cfg, note_id, {"status": "deprecated"}, f"mind: retire {note_id}")
+    msg = sync(cfg)
+    return f"mind: retired {note_id}, " + (msg or "pushed")
+
+
+def _all_note_files(cfg: Config) -> list[tuple[str, Path]]:
+    out = [("", p) for p in sorted(global_notes_dir(cfg).glob("*.md"))] if global_notes_dir(cfg).is_dir() else []
+    for slug in list_projects(cfg):
+        out += [(slug + "/", p) for p in sorted(project_notes_dir(cfg, slug).glob("*.md"))]
+    return out
+
+
+def cmd_lint(cfg: Config, days: int) -> str:
+    # Two passes, not one: every malformed row must precede every mismatch
+    # row, which a single interleaved pass (sorted by path) would not guarantee.
+    rows: list[str] = []
+    wellformed: list[tuple[str, Path, dict, str]] = []
+    for prefix, path in _all_note_files(cfg):
+        meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        rel = path.relative_to(cfg.home).as_posix()
+        errs = validate_meta(meta)
+        if errs or not _NOTE_ID_RE.fullmatch(meta.get("id") or ""):
+            rows.append(f"malformed: {rel}: " + ("; ".join(errs) or "bad id"))
+            continue
+        wellformed.append((prefix, path, meta, body))
+    notes: list[tuple[str, Note]] = []
+    for prefix, path, meta, body in wellformed:
+        rel = path.relative_to(cfg.home).as_posix()
+        if not path.name.startswith(meta["id"] + "-"):
+            rows.append(f"mismatch: {rel} id={meta['id']}")
+        notes.append((prefix, Note(path, meta, body)))
+    by_id: dict[str, list[Note]] = {}
+    for p, n in notes:
+        by_id.setdefault(p + n.id, []).append(n)
+    for dupes in by_id.values():
+        for a, b in zip(dupes, dupes[1:]):
+            rows.append(f"duplicate id: {a.path.relative_to(cfg.home).as_posix()} and "
+                        f"{b.path.relative_to(cfg.home).as_posix()}")
+    # Values carry each note's own prefix too: a project note can supersede
+    # a GLOBAL note (bare id, no prefix), and the unsuperseded row below must
+    # label that old note with its own ("") prefix, not the new note's.
+    ids: dict[str, tuple[str, Note]] = {p + n.id: (p, n) for p, n in notes}
+    for p, n in notes:
+        sup = n.meta.get("supersedes")
+        if sup and (p + sup) not in ids and sup not in ids:
+            rows.append(f"dangling: {p}{n.id} supersedes {sup}")
+        for ref in n.meta.get("refers") or []:
+            if (p + ref) not in ids and ref not in ids:
+                rows.append(f"dangling: {p}{n.id} refers to {ref}")
+    for p, n in notes:
+        sup = n.meta.get("supersedes")
+        found = ids.get(p + (sup or "")) or ids.get(sup or "")
+        if found is not None:
+            old_p, old = found
+            if old.status == "accepted":
+                rows.append(f"unsuperseded: {old_p}{old.id} (by {p}{n.id})")
+    seen: dict[tuple[str, str], str] = {}
+    for p, n in notes:
+        if n.status != "accepted":
+            continue
+        key = (p, re.sub(r"[^a-z0-9]+", " ", n.title.lower()).strip())
+        if key in seen:
+            rows.append(f"duplicate: {p}{seen[key]} and {p}{n.id}")
+        else:
+            seen[key] = n.id
+    for slug in list_projects(cfg):
+        _, body = load_project(cfg, slug)
+        if body.strip() == STUB_PROJECT_BODY.strip():
+            rows.append(f"stub: {slug}")
+    for p, n in notes:
+        if n.status == "accepted":
+            affirmed = n.meta.get("affirmed")
+            if not affirmed:
+                rows.append(f"stale: {p}{n.id} (no affirmed date)")
+            else:
+                age = _age_days(str(affirmed))
+                if age > days:
+                    rows.append(f"stale: {p}{n.id} ({age} days)")
+    global_notes = [n for p, n in notes if p == ""]
+    accepted = [n for n in global_notes if n.status == "accepted"]
+    projects_idx = build_projects_index(cfg)
+    rendered, _ = _fit(global_notes, "Global", None, "", projects_idx)
+    kept = rendered.count("\n- ")
+    if kept < len(accepted):
+        rows.append(f"budget: {kept} of {len(accepted)} global rows inject")
+    tail = "mind: lint clean\n" if not rows else f"mind: lint found {len(rows)} issues\n"
+    return "".join(r + "\n" for r in rows) + tail
+
+
+def _checkout_state(cfg: Config) -> str:
+    """Read-only classification of cfg.home's checkout: never calls
+    ensure_checkout (which clones or mutates). Mirrors its branches with no
+    side effects, for `doctor`, which must be safe to run against a home
+    that was never cloned."""
+    if not (cfg.home / ".git").is_dir():
+        return "missing"
+    if not _is_valid_git_dir(cfg):
+        return "broken (not a git dir)"
+    if not _has_head(cfg):
+        return "broken (no HEAD)"
+    return "ok"
+
+
+def _remote_reachable(cfg: Config) -> tuple[bool, int | str]:
+    """`git ls-remote` against cfg.repo directly (not the "origin" remote
+    name), so this works even when cfg.home was never cloned."""
+    if not cfg.home.parent.is_dir():
+        # git's cwd (cfg.home.parent) doesn't exist at all: a plain OSError
+        # from Popen would otherwise read as the generic "unreachable" a
+        # real network failure also produces.
+        return False, "no checkout directory"
+    t0 = time.monotonic()
+    try:
+        proc = git(cfg, ["ls-remote", "--heads", "--", cfg.repo], cfg.home.parent, 10)
+    except (subprocess.TimeoutExpired, OSError):
+        return False, "unreachable"
+    if proc.returncode == 0:
+        return True, int((time.monotonic() - t0) * 1000)
+    lines = proc.stderr.strip().splitlines()
+    return False, _redact(lines[-1] if lines else "unknown error", cfg)
+
+
+def _git_user_email(cfg: Config) -> str | None:
+    # `.git` is a FILE inside a linked worktree; see _has_configured_identity.
+    cwd = cfg.home if (cfg.home / ".git").exists() else None
+    try:
+        proc = subprocess.run(["git", "config", "user.email"], cwd=cwd, env=dict(cfg.env),
+                              capture_output=True, text=True, timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    value = proc.stdout.strip()
+    return value if proc.returncode == 0 and value else None
+
+
+def _capture_health(pending_path: Path) -> str:
+    """SF9: capture is double-silenced (capture.sh redirects to
+    /dev/null, cmd_capture swallows every exception), so an unwritable
+    MIND_PENDING or a full disk mines nothing forever while `pending: 0
+    lines` reads as healthy. Report the newest captured row's ts and the
+    line count as a health signal doctor can show instead."""
+    if not pending_path.exists():
+        return "capture: never"
+    lines = pending_path.read_text(encoding="utf-8").splitlines()
+    newest = None
+    for line in lines:
+        try:
+            ts = json.loads(line).get("ts")
+        except json.JSONDecodeError:
+            continue
+        if ts and (newest is None or ts > newest):
+            newest = ts
+    if newest is None:
+        return "capture: never"
+    return f"capture: last write {newest} ({len(lines)} lines)"
+
+
+def cmd_doctor(cfg: Config) -> str:
+    lines: list[str] = []
+    repo_display = cfg.repo if cfg.repo else "unset"
+    lines.append(_redact(
+        f"config: MIND_REPO={repo_display} MIND_HOME={cfg.home} "
+        f"MIND_TOKEN={'set' if cfg.token else 'unset'} MIND_PROJECT={cfg.project or 'unset'}", cfg))
+    state = _checkout_state(cfg)
+    lines.append(f"checkout: {state}")
+    lines.append("upstream: main tracks origin/main" if state == "ok" and _main_tracks_origin_main(cfg) else "upstream: none")
+    if not cfg.repo:
+        # A diagnostic run with no MIND_REPO configured at all: nothing to
+        # probe, but still report every other line that needs no repo.
+        lines.append("remote: unreachable (MIND_REPO not set)")
+    else:
+        reachable, info = _remote_reachable(cfg)
+        lines.append(f"remote: reachable ({info} ms)" if reachable else f"remote: unreachable ({_redact(str(info), cfg)})")
+    email = _git_user_email(cfg)
+    lines.append(f"identity: {email or 'none, will use mind@localhost'}")
+    version_proc = _gh(cfg, ["--version"], cfg.home)
+    if version_proc is None:
+        lines.append("gh: missing")
+    elif version_proc.returncode == 124:
+        lines.append("gh: present, timed out")
+    else:
+        m = re.search(r"gh version (\S+)", version_proc.stdout or "")
+        auth_proc = _gh(cfg, ["auth", "status"], cfg.home)
+        if auth_proc is not None and auth_proc.returncode == 0:
+            status = "authenticated"
+        elif auth_proc is not None and auth_proc.returncode == 124:
+            status = "present, timed out"
+        else:
+            status = "present, not authenticated"
+        lines.append(f"gh: {m.group(1) if m else 'unknown'} {status}")
+    pending_path = PENDING_FILE(cfg)
+    total = len(pending_path.read_text(encoding="utf-8").splitlines()) if pending_path.exists() else 0
+    unprocessed = len(read_pending(cfg, None, 10**6))
+    wm_path = _watermark_file(cfg)
+    watermark = wm_path.read_text(encoding="utf-8").strip() if wm_path.exists() else "none"
+    lines.append(f"pending: {total} lines, {unprocessed} unprocessed, watermark {watermark}")
+    lines.append(_capture_health(pending_path))
+    settings, settings_error = load_settings(cfg)
+    lines.append(f"settings: auto_answer={str(settings['auto_answer']).lower()} escalate={str(settings['escalate']).lower()}")
+    if settings_error:
+        lines.append(settings_error)
+    accepted = draft = 0
+    for d in [global_notes_dir(cfg)] + [project_notes_dir(cfg, s) for s in list_projects(cfg)]:
+        for n in load_notes(d):
+            if n.status == "accepted":
+                accepted += 1
+            elif n.status == "draft":
+                draft += 1
+    malformed = _malformed_count(cfg)
+    lines.append(f"notes: {accepted} accepted, {draft} drafts, {malformed} malformed, {len(list_projects(cfg))} projects")
+    return "\n".join(_redact(line, cfg) for line in lines) + "\n"
+
+
+def _ask_row(prefix: str, note: "Note", drafts: bool, *, tag: str = "") -> str:
+    line = f"{tag}{prefix}{note.id} | {note.title} | {note.meta.get('scope', 'global')} | {note.strength}"
+    if drafts:
+        line += " | draft"
+    return line + "\n  " + note.first_paragraph + "\n"
+
+
+def cmd_ask(cfg: Config, terms: list[str], all_projects: bool, project: str | None, drafts: bool, cwd: Path,
+            limit: int = 10, stage: str | None = None) -> str:
     wanted = "draft" if drafts else "accepted"
     lowered = [t.lower() for t in terms]
-    scored = []
+    others_scored: list[tuple] = []
+    precedence_all: list[tuple] = []
     for prefix, note in _scoped_notes(cfg, all_projects, project, cwd):
         if note.status != wanted:
             continue
+        if stage is not None and note.stage != stage:
+            continue
         hay = (note.title + "\n" + note.body).lower()
         hits = sum(1 for t in lowered if re.search(rf"\b{re.escape(t)}\b", hay))
-        if hits or not lowered:
-            scored.append((-hits, prefix, note.id, prefix, note))
-    if not scored:
+        row = (-hits, prefix, note.id, prefix, note)
+        if note.meta.get("type") == "precedence":
+            # Collected regardless of its own hit count: a precedence note
+            # surfaces through `refers` (below) even when its title and body
+            # never say the query term, per the documented "When A conflicts
+            # with B" convention.
+            precedence_all.append(row)
+        elif hits or not lowered:
+            others_scored.append(row)
+
+    def _qualifies(row: tuple) -> bool:
+        return row[0] < 0 or not lowered
+
+    if not others_scored and not any(_qualifies(r) for r in precedence_all):
         return f"mind: no note matches '{' '.join(terms)}'"
-    out = []
-    for _, _, _, prefix, note in sorted(scored, key=lambda r: (r[0], r[1], r[2]))[:10]:
-        line = f"{prefix}{note.id} | {note.title} | {note.meta.get('scope', 'global')} | {note.strength}"
-        if drafts:
-            line += " | draft"
-        out.append(line + "\n  " + note.first_paragraph + "\n")
+    others = sorted(others_scored, key=lambda r: (r[0], r[1], r[2]))
+    precedence = sorted(precedence_all, key=lambda r: (r[0], r[1], r[2]))
+    stage_counts: dict[str, int] = {}
+    for r in others:
+        stage_counts[r[4].stage] = stage_counts.get(r[4].stage, 0) + 1
+    promote_ok = any(count >= 2 for count in stage_counts.values())
+    hit_ids = {r[2] for r in others}
+    promoted, remaining_precedence = [], []
+    for r in precedence:
+        matched_terms = r[0] < 0
+        refers = r[4].meta.get("refers") or []
+        if promote_ok and (matched_terms or (set(refers) & hit_ids)):
+            promoted.append(r)
+        elif _qualifies(r):
+            remaining_precedence.append(r)
+    out = [_ask_row(r[3], r[4], drafts, tag="[precedence] ") for r in promoted]
+    rest = sorted(others + remaining_precedence, key=lambda r: (r[0], r[1], r[2]))
+    out += [_ask_row(r[3], r[4], drafts) for r in rest[:limit]]
     return "".join(out)
 
 
@@ -762,8 +1579,75 @@ PROTOCOL = (
     "global, facts about this repo go to the project. When this project is silent, look "
     "in related projects' notes. If two notes conflict, surface both IDs and ask. The "
     "project's own `CLAUDE.md` wins over any note. Save memories through "
-    "`/mind:remember`, not the auto-memory directory.\n"
+    "`/mind:remember`, not the auto-memory directory. Anything you inferred rather than "
+    "the owner stated goes through `propose`, never `add`. Check precedence notes before "
+    "surfacing a conflict.\n"
 )
+
+DEFAULT_SETTINGS = {"auto_answer": True, "escalate": False}
+
+
+def SETTINGS_FILE(cfg: Config) -> Path:
+    return Path(cfg.env["MIND_SETTINGS"]) if cfg.env.get("MIND_SETTINGS") else cfg.home.parent / "settings.json"
+
+
+def load_settings(cfg: Config) -> tuple[dict, str | None]:
+    """Returns (settings, error). A corrupt settings file (bad JSON, or a
+    JSON value that isn't a mapping) silently reverting to defaults would
+    flip auto_answer back to true and teach the opposite of the owner's
+    configured behaviour every session; error is set so callers can report
+    it instead of presenting the defaults as fact."""
+    out = dict(DEFAULT_SETTINGS)
+    p = SETTINGS_FILE(cfg)
+    error = None
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            for k, v in data.items():
+                if k not in DEFAULT_SETTINGS:
+                    continue
+                if isinstance(v, bool):
+                    out[k] = v
+                elif isinstance(v, str):
+                    out[k] = v.strip().lower() in ("1", "true", "yes", "on")
+                # any other JSON type keeps the default
+        except (json.JSONDecodeError, AttributeError):
+            error = "mind: settings file unreadable, using defaults"
+    return out, error
+
+
+_SETTINGS_TRUE = {"true", "1", "yes", "on"}
+_SETTINGS_FALSE = {"false", "0", "no", "off"}
+
+
+def cmd_settings(cfg: Config, sets: list[str]) -> str:
+    current, _ = load_settings(cfg)
+    for item in sets:
+        key, _, val = item.partition("=")
+        if key not in DEFAULT_SETTINGS:
+            raise ValidationError(f"unknown setting: {key}")
+        normalized = val.strip().lower()
+        if normalized in _SETTINGS_TRUE:
+            current[key] = True
+        elif normalized in _SETTINGS_FALSE:
+            current[key] = False
+        else:
+            raise ValidationError(f"{key} must be true/false/1/0/yes/no/on/off, got {val!r}")
+    if sets:
+        SETTINGS_FILE(cfg).parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS_FILE(cfg).write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
+    return "mind: settings " + " ".join(f"{k}={str(v).lower()}" for k, v in current.items())
+
+
+def _mode_line(cfg: Config) -> str:
+    s, _ = load_settings(cfg)
+    mode = "apply notes silently and cite" if s["auto_answer"] else "confirm before applying a note"
+    conflicts = "always ask" if s["escalate"] else "use precedence notes"
+    return f"Mode: {mode}. Conflicts: {conflicts}.\n"
+
+
+def _proposals_cache(cfg: Config) -> Path:
+    return PENDING_FILE(cfg).with_name(PENDING_FILE(cfg).name + ".proposals")
 
 
 def _truncate_notes(notes: list[Note], heading: str, keep: int) -> str:
@@ -818,6 +1702,17 @@ def _draft_count(cfg: Config) -> int:
     return sum(1 for d in dirs for n in load_notes(d) if n.status == "draft")
 
 
+def _schema_predates_0_2_0(cfg: Config) -> bool:
+    """0.1.0's `init` wrote a schema.md with no `precedence` note type; an
+    upgraded plugin never rewrites an existing data repo's copy (init only
+    runs once), so the owner needs a nudge to re-copy templates/schema.md
+    by hand or `refers`/`precedence` notes never make sense to them."""
+    path = cfg.home / "schema.md"
+    if not path.is_file():
+        return False
+    return "precedence" not in path.read_text(encoding="utf-8").lower()
+
+
 def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
     out = []
     if event in ("startup", "resume"):
@@ -830,9 +1725,18 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
         else:
             # Indexes are gitignored, so a fresh clone (or one another
             # machine just pushed notes into) has no up-to-date index.md
-            # on disk until it is regenerated locally.
-            reindex(cfg)
+            # on disk until it is regenerated locally. An OSError here
+            # (disk full, permissions) must not reach main's own bare
+            # except Exception and replace the whole payload built so far.
+            try:
+                reindex(cfg)
+            except OSError as exc:
+                out.append(f"mind: reindex failed, {exc}\n")
     out.append(PROTOCOL.format(home=cfg.home))
+    _, settings_error = load_settings(cfg)
+    if settings_error:
+        out.append(settings_error + "\n")
+    out.append("\n" + _mode_line(cfg))
     candidate = resolve_candidate(cfg, cwd)
     slug = match_project(cfg, candidate)
     global_notes = load_notes(global_notes_dir(cfg))
@@ -845,7 +1749,10 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
         # missing. Reading it missing as "# Projects\n" would silently tell
         # the owner they have zero projects, a wrong answer rather than an
         # error.
-        reindex(cfg)
+        try:
+            reindex(cfg)
+        except OSError as exc:
+            out.append(f"mind: reindex failed, {exc}\n")
     projects_idx = projects_index_path.read_text(encoding="utf-8") if projects_index_path.is_file() else "# Projects\n"
     global_idx, project_idx = _fit(global_notes, "Global", project_notes, project_heading, projects_idx)
     out += ["\n" + global_idx, "\n" + project_idx, "\n" + projects_idx]
@@ -856,6 +1763,66 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
     malformed = _malformed_count(cfg)
     if malformed:
         out.append(f"\n{malformed} malformed notes skipped, see {cfg.home}\n")
+    if _schema_predates_0_2_0(cfg):
+        out.append("mind: schema.md predates 0.2.0, re-copy templates/schema.md\n")
+    cache = _proposals_cache(cfg)
+    # PR-4: a fetch plus `gh pr list` on top of the existing pull, on every
+    # startup/resume, is a worst case near 40s inside a SessionStart hook.
+    # `resume` (a plain conversation resume, not a fresh session) serves a
+    # cache written less than an hour ago as-is; only `startup` always
+    # refreshes.
+    cache_is_fresh = False
+    if cache.exists():
+        try:
+            cache_is_fresh = (time.time() - cache.stat().st_mtime) < 3600
+        except OSError:
+            cache_is_fresh = False
+    if event == "startup" or (event == "resume" and not cache_is_fresh):
+        try:
+            fresh_rows, warning = _proposals(cfg)
+        except Exception:
+            # inject must never lose the payload already built above over a
+            # proposals-listing failure (a hung git or gh call): degrade to
+            # no proposals line this session -- but never poison a good
+            # cache with an empty list, or every later clear/compact would
+            # report zero proposals too. None (not []) marks "skip the
+            # write"; a real empty listing is still cached below.
+            fresh_rows, warning = None, None
+        rows = fresh_rows if fresh_rows is not None else []
+        if warning:
+            out.append(warning + "\n")
+        if fresh_rows is not None:
+            try:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_text(json.dumps(fresh_rows), encoding="utf-8")
+            except OSError as exc:
+                out.append(f"mind: proposals cache write failed, {exc}\n")
+    else:
+        rows = []
+        if cache.exists():
+            try:
+                rows = [tuple(r) for r in json.loads(cache.read_text(encoding="utf-8"))]
+            except json.JSONDecodeError:
+                rows = []
+    if rows:
+        n = len(rows)
+        noun = "proposal" if n == 1 else "proposals"
+        first_b, first_u = rows[0]
+        out.append(f"\n{n} open {noun}: {first_b} {first_u}\n")
+        # At most 5 rows total (the one above counts as one): unbounded
+        # growth here is outside INDEX_BUDGET, and a month of unmerged
+        # daily digests would otherwise cost ~2.5 KB of context every
+        # session start.
+        shown = rows[1:5]
+        out.extend(f"{b} {u}\n" for b, u in shown)
+        remaining = n - 1 - len(shown)
+        if remaining > 0:
+            out.append(f"+{remaining} more, run mind.py proposals\n")
+    pending = read_pending(cfg, None, 10**6)
+    if len(pending) >= 20:
+        wm_path = _watermark_file(cfg)
+        date = wm_path.read_text(encoding="utf-8").strip()[:10] if wm_path.exists() else "the beginning"
+        out.append(f"\n{len(pending)} pending prompts since {date}: run /mind:digest\n")
     return "".join(out)
 
 
@@ -872,10 +1839,37 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--all", action="store_true")
     q.add_argument("--project")
     q.add_argument("--drafts", action="store_true")
+    q.add_argument("--limit", type=int, default=10)
+    q.add_argument("--stage", choices=STAGES)
     sub.add_parser("reindex")
     sub.add_parser("accept").add_argument("note_id")
     sub.add_parser("sync").add_argument("--pull-only", action="store_true")
     sub.add_parser("init")
+    pr = sub.add_parser("propose")
+    pr.add_argument("drafts", nargs="+")
+    pr.add_argument("--topic", required=True)
+    pr.add_argument("--scope", choices=["global", "project"], default="global")
+    pr.add_argument("--project")
+    pr.add_argument("--body")
+    sub.add_parser("proposals")
+    sub.add_parser("capture")
+    pe = sub.add_parser("pending")
+    pe.add_argument("--since")
+    pe.add_argument("--limit", type=int, default=200)
+    pe.add_argument("--mark")
+    pe.add_argument("--clear", action="store_true")
+    st = sub.add_parser("stale")
+    st.add_argument("--days", type=int, default=90)
+    st.add_argument("--all", action="store_true")
+    af = sub.add_parser("affirm")
+    af.add_argument("note_id")
+    af.add_argument("--strength", choices=STRENGTHS)
+    sub.add_parser("retire").add_argument("note_id")
+    li = sub.add_parser("lint")
+    li.add_argument("--days", type=int, default=180)
+    se = sub.add_parser("settings")
+    se.add_argument("--set", dest="sets", action="append", default=[])
+    sub.add_parser("doctor")
     return p
 
 
@@ -908,12 +1902,30 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
             return 0
         print(msg)
         return 0
+    if args.cmd == "capture":
+        # Passive capture must never fail the hook or print anything: any
+        # problem (no MIND_REPO, malformed hook JSON, a write error) is
+        # silently swallowed, same contract as the shell wrapper around it.
+        try:
+            cfg = Config.from_env(env, cwd)
+            payload = json.load(sys.stdin)
+            cmd_capture(cfg, payload, cwd)
+        except Exception:
+            pass
+        return 0
+    if args.cmd == "doctor":
+        # A diagnostic command must never exit 1 just because MIND_REPO is
+        # unset -- that is exactly the kind of misconfiguration a second
+        # machine or a cloud session needs it to explain.
+        cfg = Config.from_env(env, cwd, require_repo=False)
+        print(cmd_doctor(cfg))
+        return 0
     try:
         cfg = Config.from_env(env, cwd)
     except ConfigError as exc:
         print(f"mind: {exc}", file=sys.stderr)
         return 1
-    if args.cmd != "reindex":
+    if args.cmd != "reindex":   # "doctor" already returned above
         clone_failed = ensure_checkout(cfg)
         if clone_failed:
             # Unlike inject (the session-start hook, which must never block
@@ -930,12 +1942,50 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
         elif args.cmd == "accept":
             msg = cmd_accept(cfg, args.note_id)
         elif args.cmd == "ask":
-            msg = cmd_ask(cfg, args.terms, args.all, args.project, args.drafts, cwd)
+            msg = cmd_ask(cfg, args.terms, args.all, args.project, args.drafts, cwd,
+                          limit=args.limit, stage=args.stage)
         elif args.cmd == "reindex":
             reindex(cfg)
             msg = "mind: reindexed"
         elif args.cmd == "sync":
             msg = sync(cfg, pull_only=args.pull_only) or "mind: in sync"
+        elif args.cmd == "propose":
+            msg = cmd_propose(cfg, [Path(d) for d in args.drafts], args.topic, args.scope, args.project,
+                              Path(args.body) if args.body else None, cwd)
+        elif args.cmd == "proposals":
+            rows = cmd_proposals(cfg)
+            msg = "\n".join(f"{b} {u}" for b, u in rows) if rows else "mind: no open proposals"
+        elif args.cmd == "pending":
+            if args.mark or args.clear:
+                # Both flags run, in order: a bare --clear with no watermark
+                # at all does nothing rather than truncating unprocessed
+                # prompts (see clear_pending).
+                parts = []
+                if args.mark:
+                    mark_pending(cfg, args.mark)
+                    parts.append(f"pending marked at {args.mark}")
+                if args.clear:
+                    cleared = clear_pending(cfg)
+                    if cleared or args.mark:
+                        parts.append("pending cleared")
+                    else:
+                        parts = ["nothing marked, nothing cleared"]
+                msg = "mind: " + ", ".join(parts)
+            else:
+                rows = read_pending(cfg, args.since, args.limit)
+                for row in rows:
+                    print(json.dumps(row, ensure_ascii=False))
+                return 0
+        elif args.cmd == "stale":
+            msg = cmd_stale(cfg, args.days, args.all, cwd)
+        elif args.cmd == "affirm":
+            msg = cmd_affirm(cfg, args.note_id, args.strength)
+        elif args.cmd == "retire":
+            msg = cmd_retire(cfg, args.note_id)
+        elif args.cmd == "lint":
+            msg = cmd_lint(cfg, args.days)
+        elif args.cmd == "settings":
+            msg = cmd_settings(cfg, args.sets)
     except ValidationError as exc:
         print(f"mind: {exc}", file=sys.stderr)
         return 1

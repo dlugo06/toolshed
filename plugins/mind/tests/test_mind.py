@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -56,7 +57,10 @@ def test_hook_does_not_block_on_a_tty_stdin(tmp_path):
         )
         os.close(follower_fd)
         try:
-            proc.communicate(timeout=5)
+            # PR-minor: 5s was observed flaky under load in a ~112s full-suite
+            # run; 15s gives headroom without meaningfully slowing a genuine
+            # hang's failure.
+            proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
@@ -157,7 +161,7 @@ def test_parse_frontmatter_missing_returns_empty_meta():
 def test_validate_meta_reports_every_problem():
     errs = mind.validate_meta({"title": "x", "type": "wish", "stage": "review"})
     assert errs == [
-        "type must be one of: principle, preference, decision, procedure, gotcha, reference",
+        "type must be one of: principle, preference, decision, procedure, gotcha, reference, precedence",
         "missing required field: strength",
     ]
     assert mind.validate_meta({"title": "x", "type": "gotcha", "stage": "deployment", "strength": "should"}) == []
@@ -346,6 +350,34 @@ def test_rebase_failure_message_shares_pull_classification(repo):
     assert msg == "mind: sync blocked: fatal: Not possible to fast-forward, aborting."
 
 
+def test_pull_failure_message_classifies_auth_failure_not_offline(repo):
+    """SF4: a revoked token or wrong deploy key must not be classified as
+    offline -- the owner would wait for connectivity that is not the
+    problem. Permission denied/Authentication/publickey stderr is a sync
+    block naming the authentication failure specifically."""
+    cfg, _, _ = repo
+    proc = subprocess.CompletedProcess(
+        args=["git", "pull"], returncode=128, stdout="",
+        stderr="git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.\n",
+    )
+    msg = mind._pull_failure_message(cfg, proc)
+    assert msg == "mind: sync blocked: authentication failed (fatal: Could not read from remote repository.)"
+    assert "offline" not in msg
+
+
+def test_pull_failure_message_classifies_could_not_read_username_as_auth(repo):
+    """SF4: an https remote with no credential helper answering fails with
+    'could not read Username', also authentication, not offline."""
+    cfg, _, _ = repo
+    proc = subprocess.CompletedProcess(
+        args=["git", "pull"], returncode=128, stdout="",
+        stderr="fatal: could not read Username for 'https://example.test': terminal prompts disabled\n",
+    )
+    msg = mind._pull_failure_message(cfg, proc)
+    assert msg.startswith("mind: sync blocked: authentication failed (")
+    assert "offline" not in msg
+
+
 def test_cmd_init_against_empty_bare_repo_pushes_and_sets_upstream(tmp_path):
     """The documented first-run path: an empty data repo has no upstream
     branch yet. init must still push, not report offline forever."""
@@ -486,6 +518,50 @@ def test_sync_retry_pull_timeout_returns_push_failed_line(repo, monkeypatch):
     assert msg == "mind: push failed, note is committed locally; it will push on the next remember or session start"
     status = _git(["status", "--porcelain"], cfg.home).stdout
     assert status == ""  # no leftover rebase state
+
+
+def test_push_appends_redacted_last_stderr_line_on_failure(repo, monkeypatch):
+    """SF5: push() discarded stderr entirely, so a hard rejection (branch
+    protection, 403) read identically to a transient failure. Append the
+    last stderr line to the push-failed message."""
+    cfg, _, _ = repo
+    (cfg.home / "a.md").write_text("a\n")
+    mind.commit_all(cfg, "mind: add a")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:1] == ["push"]:
+            return subprocess.CompletedProcess(
+                args=args, returncode=1, stdout="",
+                stderr="remote: Protected branch update failed\nfatal: push rejected\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    msg = mind.push(cfg)
+    assert msg == ("mind: push failed, note is committed locally; it will push on the next remember or "
+                    "session start: fatal: push rejected")
+
+
+def test_push_redacts_token_from_appended_stderr_line(repo, monkeypatch):
+    """SF5's appended stderr line must go through the same credential
+    redaction as every other git-stderr-derived message."""
+    cfg, _, _ = repo
+    cfg = dataclasses.replace(cfg, token="sekrit-token")
+    (cfg.home / "a.md").write_text("a\n")
+    mind.commit_all(cfg, "mind: add a")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:1] == ["push"]:
+            return subprocess.CompletedProcess(
+                args=args, returncode=1, stdout="",
+                stderr="fatal: unable to access 'https://x-access-token:sekrit-token@example.test/o/r.git/'\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    msg = mind.push(cfg)
+    assert "sekrit-token" not in msg
+    assert msg.endswith(": fatal: unable to access 'https://***@example.test/o/r.git/'")
 
 
 def test_token_goes_on_command_line_not_disk(repo):
@@ -993,6 +1069,23 @@ def test_git_base_args_adds_identity_only_when_git_config_has_none(repo):
     assert "user.name=mind" not in args_with_config
 
 
+def test_identity_helpers_find_config_from_a_linked_worktree(repo, tmp_path):
+    """M8: in a linked worktree `.git` is a FILE, not a directory. Checking
+    `.is_dir()` missed that case entirely and ran `git config user.email`
+    with the caller's ambient cwd instead of the data repo, missing an
+    identity configured only in the data repo's own `.git/config`."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _git(["config", "user.email", "owner@example.com"], cfg.home)
+
+    wt = tmp_path / "wt"
+    _git(["worktree", "add", "-q", "-b", "scratch", "--", str(wt)], cfg.home)
+    wcfg = dataclasses.replace(cfg, home=wt)
+    assert (wt / ".git").is_file()   # sanity: a linked worktree, not a plain repo
+    assert mind._has_configured_identity(wcfg) is True
+    assert mind._git_user_email(wcfg) == "owner@example.com"
+
+
 def test_cmd_add_reports_push_failure_but_keeps_commit(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
@@ -1259,6 +1352,81 @@ def test_cmd_ask_drafts_lists_only_drafts(repo, tmp_path):
     assert mind.cmd_ask(cfg, [], False, None, True, tmp_path) == "PREF-REV-002 | Draft one | global | should | draft\n  d\n"
 
 
+def test_precedence_type_and_refers_field(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    d = tmp_path / "p.md"
+    d.write_text("---\ntitle: When PREF-REV-001 conflicts with PREF-REV-002, the first wins on public repos\n"
+                 "type: precedence\nstage: review\nstrength: should\nrefers: [PREF-REV-001, PREF-REV-002]\n---\n"
+                 "When PREF-REV-001 conflicts with PREF-REV-002, PREF-REV-001 wins when the repo is public.\n")
+    out = mind.cmd_add(cfg, d, "global", None, tmp_path)
+    assert out == "mind: added PREC-REV-001 (global), pushed"
+    meta, _ = mind.parse_frontmatter(next(mind.global_notes_dir(cfg).glob("PREC-REV-001-*.md")).read_text())
+    assert meta["refers"] == ["PREF-REV-001", "PREF-REV-002"]
+
+
+def test_ask_precedence_first_and_limit(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    for i in range(3):
+        _add(cfg, tmp_path, f"Threads rule {i}", "threads body")
+    d = tmp_path / "p.md"
+    d.write_text("---\ntitle: Threads precedence\ntype: precedence\nstage: review\nstrength: should\n"
+                 "refers: [PREF-REV-001, PREF-REV-002]\n---\nWhen PREF-REV-001 conflicts with PREF-REV-002, PREF-REV-001 wins on threads.\n")
+    mind.cmd_add(cfg, d, "global", None, tmp_path)
+    out = mind.cmd_ask(cfg, ["threads"], False, None, False, tmp_path, limit=2)
+    assert out.startswith("[precedence] PREC-REV-001 | Threads precedence | global | should\n")
+    assert out.count("\n  ") == 3   # precedence row + 2 limited rows
+    out2 = mind.cmd_ask(cfg, ["threads"], False, None, False, tmp_path, stage="testing")
+    assert out2 == "mind: no note matches 'threads'"
+
+
+def test_ask_precedence_not_promoted_when_hits_do_not_share_a_stage(repo, tmp_path):
+    """Two matching notes in different stages must not trigger the
+    precedence promotion, even when a precedence note's `refers` names both
+    of them: the plan's promotion gate is 'two or more hits share a stage',
+    checked before refers is ever consulted."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    d1 = tmp_path / "dev.md"
+    d1.write_text(mind.render_frontmatter(
+        {"title": "Dev threads rule", "type": "preference", "stage": "development", "strength": "should"},
+        "threads body.\n"))
+    mind.cmd_add(cfg, d1, "global", None, tmp_path)
+    d2 = tmp_path / "rev.md"
+    d2.write_text(mind.render_frontmatter(
+        {"title": "Review threads rule", "type": "preference", "stage": "review", "strength": "should"},
+        "threads body.\n"))
+    mind.cmd_add(cfg, d2, "global", None, tmp_path)
+    d3 = tmp_path / "prec.md"
+    d3.write_text("---\ntitle: Dev vs review precedence\ntype: precedence\nstage: review\nstrength: should\n"
+                  "refers: [PREF-DEV-001, PREF-REV-001]\n---\nWhen PREF-DEV-001 conflicts with PREF-REV-001, PREF-DEV-001 wins.\n")
+    mind.cmd_add(cfg, d3, "global", None, tmp_path)
+    out = mind.cmd_ask(cfg, ["threads"], False, None, False, tmp_path)
+    assert "[precedence]" not in out
+
+
+def test_ask_precedence_promoted_via_refers_without_matching_query_text(repo, tmp_path):
+    """H4: a precedence note whose own title/body never says the query term
+    must still surface (and be tagged first) through `refers` alone, once
+    two of the notes it refers to share a stage and both hit the query."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Threads rule zero", "threads body")
+    _add(cfg, tmp_path, "Threads rule one", "threads body")
+    d = tmp_path / "p.md"
+    d.write_text("---\ntitle: When PREF-REV-001 conflicts with PREF-REV-002\ntype: precedence\nstage: review\n"
+                 "strength: should\nrefers: [PREF-REV-001, PREF-REV-002]\n---\n"
+                 "PREF-REV-001 wins on public repos.\n")
+    mind.cmd_add(cfg, d, "global", None, tmp_path)
+    out = mind.cmd_ask(cfg, ["threads"], False, None, False, tmp_path)
+    assert out.startswith(
+        "[precedence] PREC-REV-001 | When PREF-REV-001 conflicts with PREF-REV-002 | global | should\n"
+        "  PREF-REV-001 wins on public repos.\n")
+    assert "PREF-REV-001 | Threads rule zero" in out
+    assert "PREF-REV-002 | Threads rule one" in out
+
+
 def test_cmd_inject_prints_sections_in_order(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
@@ -1270,6 +1438,7 @@ def test_cmd_inject_prints_sections_in_order(repo, tmp_path, monkeypatch):
     out = mind.cmd_inject(cfg, "startup", work)
     assert out == (
         mind.PROTOCOL.format(home=cfg.home)
+        + "\nMode: apply notes silently and cite. Conflicts: use precedence notes.\n"
         + "\n# Global\n\n## review\n- PREF-REV-001 | Global rule | should\n"
         + "\n# proj-a\n\n## review\n- PREF-REV-001 | Project rule | should\n"
         + "\n# Projects\n\n- proj-a | proj-a |  | Describe the project: purpose, kind of work, repo URL.\n"
@@ -1301,6 +1470,25 @@ def test_cmd_inject_reports_malformed_note_count_and_hides_off_enum_stage(repo, 
     assert f"1 malformed notes skipped, see {cfg.home}\n" in out
 
 
+def test_cmd_inject_warns_when_schema_predates_0_2_0(repo, tmp_path):
+    """L schema: a data repo's schema.md written by a pre-0.2.0 `init` has
+    no `precedence` type documented; `inject` must nudge the owner to
+    re-copy templates/schema.md rather than leave `refers`/`precedence`
+    undocumented forever (init only ever writes schema.md once)."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    (cfg.home / "schema.md").write_text("# schema\nno mention of the new type here\n")
+    out = mind.cmd_inject(cfg, "compact", tmp_path)
+    assert "mind: schema.md predates 0.2.0, re-copy templates/schema.md\n" in out
+
+
+def test_cmd_inject_no_schema_warning_when_precedence_documented(repo, tmp_path):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)   # writes the current templates/schema.md, which documents precedence
+    out = mind.cmd_inject(cfg, "compact", tmp_path)
+    assert "predates 0.2.0" not in out
+
+
 def test_cmd_inject_without_project(repo, tmp_path):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
@@ -1330,8 +1518,10 @@ def test_cmd_inject_compact_makes_no_network_call(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
     monkeypatch.setattr(mind, "pull", lambda c: pytest.fail("pull called on compact"))
+    monkeypatch.setattr(mind, "_proposals", lambda c: pytest.fail("_proposals called on compact"))
     out = mind.cmd_inject(cfg, "compact", tmp_path)
     assert out.startswith(mind.PROTOCOL.format(home=cfg.home))
+    assert "open proposal" not in out
 
 
 def test_cmd_inject_offline_line(repo, tmp_path, monkeypatch):
@@ -1340,6 +1530,98 @@ def test_cmd_inject_offline_line(repo, tmp_path, monkeypatch):
     monkeypatch.setattr(mind, "pull", lambda c: "mind: offline, using cached copy from 2026-09-12")
     out = mind.cmd_inject(cfg, "resume", tmp_path)
     assert out.startswith("mind: offline, using cached copy from 2026-09-12\n")
+
+
+def test_cmd_inject_resume_with_fresh_cache_skips_proposals_refresh(repo, tmp_path, monkeypatch):
+    """PR-4: resume previously called _proposals (a fetch plus `gh pr
+    list`) on every SessionStart, on top of the existing pull -- worst
+    case ~40s inside a SessionStart hook. A cache written less than an
+    hour ago must be served as-is, with no _proposals call at all."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    cache = mind._proposals_cache(cfg)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps([["propose/2026-09-12-x", "https://example.test/pr/9"]]), encoding="utf-8")
+    monkeypatch.setattr(mind, "_proposals", lambda c: pytest.fail("_proposals called on resume with a fresh cache"))
+    out = mind.cmd_inject(cfg, "resume", tmp_path)
+    assert "1 open proposal: propose/2026-09-12-x https://example.test/pr/9" in out
+
+
+def test_cmd_inject_resume_with_stale_cache_refreshes(repo, tmp_path, monkeypatch):
+    """PR-4: a cache older than an hour must still be refreshed on
+    resume, not served forever."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    cache = mind._proposals_cache(cfg)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps([["propose/stale-x", "https://example.test/pr/1"]]), encoding="utf-8")
+    old = time.time() - 3601
+    os.utime(cache, (old, old))
+    monkeypatch.setattr(mind, "_proposals",
+                        lambda c: ([("propose/2026-09-12-fresh", "https://example.test/pr/9")], None))
+    out = mind.cmd_inject(cfg, "resume", tmp_path)
+    assert "1 open proposal: propose/2026-09-12-fresh https://example.test/pr/9" in out
+
+
+def test_cmd_inject_survives_proposals_fetch_timeout(repo, tmp_path, monkeypatch):
+    """A hung fetch inside cmd_proposals must not discard the whole session-
+    start payload: it degrades to no proposals line (and an empty cache),
+    not a crash that drops the protocol and every index already built."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Global rule", "g")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:1] == ["fetch"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    out = mind.cmd_inject(cfg, "startup", tmp_path)
+    assert "PREF-REV-001 | Global rule | should" in out
+    assert "open proposal" not in out
+    cache = mind._proposals_cache(cfg)
+    assert json.loads(cache.read_text()) == []
+
+
+def test_cmd_inject_proposals_listing_failure_does_not_poison_cache(repo, tmp_path, monkeypatch):
+    """SF2: a proposals-listing failure that raises (not the already-handled
+    fetch timeout) must never overwrite a good cache with an empty list --
+    a later clear/compact would otherwise report zero proposals forever."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    cache = mind._proposals_cache(cfg)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps([["propose/2026-09-12-x", "https://example.test/pr/9"]]), encoding="utf-8")
+
+    def boom(c):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mind, "_proposals", boom)
+    out = mind.cmd_inject(cfg, "startup", tmp_path)
+    assert "open proposal" not in out   # this session shows nothing rather than a wrong count
+    assert json.loads(cache.read_text()) == [["propose/2026-09-12-x", "https://example.test/pr/9"]]
+    out2 = mind.cmd_inject(cfg, "compact", tmp_path)
+    assert "1 open proposal: propose/2026-09-12-x https://example.test/pr/9" in out2
+
+
+def test_cmd_inject_reindex_failure_does_not_lose_payload(repo, tmp_path, monkeypatch):
+    """SF2: reindex (after sync, and the projects-index fallback) sat
+    outside any try/except; an OSError there (disk full, permissions)
+    reached main's own except Exception and replaced the whole payload
+    with "mind: inject failed, OSError: ...". It must instead print one
+    line and keep everything built so far."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+
+    def boom(c):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(mind, "reindex", boom)
+    out = mind.cmd_inject(cfg, "startup", tmp_path)
+    assert "mind: reindex failed, disk full\n" in out
+    assert mind.PROTOCOL.format(home=cfg.home) in out
 
 
 def test_cmd_inject_truncates_global_first(repo, tmp_path, monkeypatch):
@@ -1475,3 +1757,1404 @@ def test_hook_end_to_end(repo, tmp_path):
     )
     assert proc.returncode == 0
     assert "- PREF-REV-001 | Global rule | should" in proc.stdout
+
+
+class FakeGh:
+    """Records argv; returns a PR URL for `pr create`, a JSON list for `pr list`.
+    Snapshots the --body-file content at call time into `last_body`, since
+    cmd_propose deletes its generated body file in its own `finally`, before
+    a caller sees the return value."""
+    def __init__(self, existing=None):
+        self.calls = []
+        self.existing = existing or []
+        self.last_body = None
+
+    def __call__(self, cfg, args, cwd, timeout=20):
+        self.calls.append(args)
+        if args[:2] == ["pr", "create"]:
+            if "--body-file" in args:
+                bf = Path(args[args.index("--body-file") + 1])
+                self.last_body = bf.read_text() if bf.exists() else None
+            return subprocess.CompletedProcess(args, 0, "https://example.test/pr/7\n", "")
+        if args[:2] == ["pr", "list"]:
+            return subprocess.CompletedProcess(args, 0, json.dumps(self.existing), "")
+        if args[:2] == ["auth", "status"]:
+            return subprocess.CompletedProcess(args, 0, "", "Logged in")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+
+def test_cmd_propose_branch_commits_pr_and_leaves_main_untouched(repo, tmp_path, monkeypatch):
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    fake = FakeGh(); monkeypatch.setattr(mind, "_gh", fake)
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
+    d2 = tmp_path / "b.md"; d2.write_text(DRAFT.replace("Tests must assert concrete values", "Second claim"))
+    out = mind.cmd_propose(cfg, [d1, d2], "Digest Run", "global", None, None, tmp_path)
+    assert out == "mind: proposed 2 notes on propose/2026-09-12-digest-run, PR https://example.test/pr/7"
+    assert _git(["branch", "--show-current"], cfg.home).stdout.strip() == "main"
+    assert not list(cfg.home.parent.glob("worktree-*"))          # temporary worktree removed
+    assert _git(["worktree", "list"], cfg.home).stdout.count("\n") == 1   # only the main checkout remains
+    log = _git(["log", "--format=%s", "propose/2026-09-12-digest-run", "-2"], bare).stdout.splitlines()
+    assert log == ["mind: propose PRIN-TEST-002 Second claim", "mind: propose PRIN-TEST-001 Tests must assert concrete values"]
+    assert not list(mind.global_notes_dir(cfg).glob("PRIN-TEST-*.md"))   # main untouched
+    create = [c for c in fake.calls if c[:2] == ["pr", "create"]][0]
+    assert "--title" in create and create[create.index("--title") + 1] == "mind: Digest Run (2 notes)"
+    assert fake.last_body.startswith(
+        "- PRIN-TEST-001 | Tests must assert concrete values | global | must\n  Assert exact values, never `is not None`.\n")
+    assert not (cfg.home.parent / "proposal-digest-run.md").exists()   # M5: generated body file cleaned up
+
+
+def test_gh_disables_prompts_via_env(repo, monkeypatch):
+    """L: `gh auth status` can prompt for a browser on some gh versions;
+    GH_PROMPT_DISABLED=1 must be set so a `doctor` run never hangs waiting
+    for interactive input."""
+    cfg, _, _ = repo
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(mind.shutil, "which", lambda name: "/usr/bin/gh")
+    monkeypatch.setattr(mind.subprocess, "run", fake_run)
+    mind._gh(cfg, ["--version"], cfg.home)
+    assert captured["env"] is not None
+    assert captured["env"].get("GH_PROMPT_DISABLED") == "1"
+
+
+def test_gh_timeout_returns_completed_process_not_none(repo, monkeypatch):
+    """SF10: _gh conflated missing, timed out, and unauthenticated by
+    returning None for all three -- doctor then printed "present, not
+    authenticated" on a mere timeout, and propose said "open the PR by
+    hand" without saying why. A timeout must be distinguishable from
+    "gh not installed"."""
+    cfg, _, _ = repo
+    monkeypatch.setattr(mind.shutil, "which", lambda name: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(mind.subprocess, "run", fake_run)
+    proc = mind._gh(cfg, ["auth", "status"], cfg.home)
+    assert proc is not None
+    assert proc.returncode == 124
+    assert proc.stderr == "timed out"
+
+
+def test_gh_returns_none_only_when_gh_is_missing(repo, monkeypatch):
+    cfg, _, _ = repo
+    monkeypatch.setattr(mind.shutil, "which", lambda name: None)
+    assert mind._gh(cfg, ["--version"], cfg.home) is None
+
+
+def test_doctor_reports_gh_present_timed_out_on_auth_status_timeout(repo, monkeypatch):
+    """SF10: doctor previously printed "present, not authenticated" on a
+    mere `gh auth status` timeout, indistinguishable from a real auth
+    failure."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
+
+    def fake_gh(c, args, cwd, timeout=20):
+        if args == ["--version"]:
+            return subprocess.CompletedProcess(args, 0, "gh version 2.0.0\n", "")
+        if args == ["auth", "status"]:
+            return subprocess.CompletedProcess(args, 124, "", "timed out")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(mind, "_gh", fake_gh)
+    out = mind.cmd_doctor(cfg).splitlines()
+    assert out[5] == "gh: 2.0.0 present, timed out"
+
+
+def test_cmd_propose_without_gh(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
+    assert mind.cmd_propose(cfg, [d1], "x", "global", None, None, tmp_path) == \
+        "mind: proposed 1 note on propose/2026-09-12-x, open the PR by hand"
+
+
+def test_cmd_propose_deletes_generated_body_file_after_success(repo, tmp_path, monkeypatch):
+    """M5: the auto-generated `proposal-<topic>.md` body file (left in
+    cfg.home.parent for `gh pr create --body-file`) must not linger once the
+    command is done, when the caller never supplied its own --body file."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert not (cfg.home.parent / "proposal-x.md").exists()
+
+
+def test_cmd_propose_keeps_caller_supplied_body_file(repo, tmp_path, monkeypatch):
+    """A caller-supplied --body file is never deleted: only the one this
+    command generated itself."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    body = tmp_path / "custom-body.md"; body.write_text("custom\n")
+    mind.cmd_propose(cfg, [d], "x", "global", None, body, tmp_path)
+    assert body.exists()
+
+
+def test_cmd_propose_rejects_batch_on_invalid_draft(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    good = tmp_path / "a.md"; good.write_text(DRAFT)
+    bad = tmp_path / "b.md"; bad.write_text("---\ntitle: x\ntype: wish\nstage: review\nstrength: must\n---\nb\n")
+    with pytest.raises(mind.ValidationError, match="b.md: type must be one of"):
+        mind.cmd_propose(cfg, [good, bad], "x", "global", None, None, tmp_path)
+    assert _git(["branch", "--list", "propose/*"], cfg.home).stdout == ""
+
+
+def test_cmd_propose_rejects_unrecognised_draft_scope_value(repo, tmp_path, monkeypatch):
+    """L: an unrecognised `scope:` value in a draft's frontmatter (e.g.
+    "acme") must be rejected, not silently fall back to the command's own
+    --scope/--project flags."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    d = tmp_path / "a.md"
+    d.write_text("---\ntitle: X\ntype: preference\nstage: review\nstrength: should\nscope: acme\n---\nbody\n")
+    with pytest.raises(mind.ValidationError, match="a.md: unrecognised scope: 'acme'"):
+        mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert not list(cfg.home.parent.glob("worktree-*"))
+    assert _git(["branch", "--list", "propose/*"], cfg.home).stdout == ""
+
+
+def test_cmd_propose_supersedes_flips_old_note_in_branch(repo, tmp_path, monkeypatch):
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Old rule", "old")
+    monkeypatch.setattr(mind, "_gh", FakeGh()); monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "n.md"
+    d.write_text("---\ntitle: New rule\ntype: preference\nstage: review\nstrength: should\nsupersedes: PREF-REV-001\n---\nnew\n")
+    mind.cmd_propose(cfg, [d], "revise", "global", None, None, tmp_path)
+    shown = _git(["show", "propose/2026-09-12-revise:global/notes/PREF-REV-001-old-rule.md"], bare).stdout
+    assert mind.parse_frontmatter(shown)[0]["status"] == "superseded"
+
+
+def test_cmd_propose_raises_when_supersedes_target_is_missing(repo, tmp_path, monkeypatch):
+    """L: a draft naming a nonexistent ID in `supersedes` must be rejected
+    before the worktree is even created, not silently ignored -- the review
+    skill's revise flow would otherwise open a PR with a dangling reference
+    that only `lint` catches later."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "n.md"
+    d.write_text("---\ntitle: New rule\ntype: preference\nstage: review\nstrength: should\nsupersedes: PREF-REV-999\n---\nnew\n")
+    with pytest.raises(mind.ValidationError, match="n.md: supersedes PREF-REV-999 not found"):
+        mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert not list(cfg.home.parent.glob("worktree-*"))
+    assert _git(["branch", "--list", "propose/*"], cfg.home).stdout == ""
+
+
+def test_cmd_proposals_lists_open_branches(repo, monkeypatch):
+    cfg, _, seed = repo
+    mind.cmd_init(cfg)
+    _git(["checkout", "-q", "-b", "propose/2026-09-12-x"], seed); (seed / "z.md").write_text("z\n")
+    _git(["add", "."], seed); _git(["commit", "-q", "-m", "z"], seed); _git(["push", "-q", "-u", "origin", "propose/2026-09-12-x"], seed)
+    monkeypatch.setattr(mind, "_gh", FakeGh(existing=[{"headRefName": "propose/2026-09-12-x", "url": "https://example.test/pr/9"}]))
+    assert mind.cmd_proposals(cfg) == [("propose/2026-09-12-x", "https://example.test/pr/9")]
+
+
+def test_cmd_proposals_gh_pr_list_uses_limit_100(repo, monkeypatch):
+    """PR-6: `gh pr list --state open` has no --limit, and gh defaults to
+    30 -- past 30 open PRs on the data repo, proposal rows print with an
+    empty URL rather than saying the lookup was truncated."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    fake = FakeGh()
+    monkeypatch.setattr(mind, "_gh", fake)
+    mind.cmd_proposals(cfg)
+    listing_calls = [c for c in fake.calls if c[:2] == ["pr", "list"]]
+    assert listing_calls
+    assert "--limit" in listing_calls[0] and listing_calls[0][listing_calls[0].index("--limit") + 1] == "100"
+
+
+def test_cmd_proposals_lists_unpushed_local_branch(repo):
+    """A propose branch committed but never pushed (a failed push) must
+    still be visible to the owner, tagged "(unpushed)"."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _git(["checkout", "-q", "-b", "propose/2026-09-12-stuck"], cfg.home)
+    (cfg.home / "stuck.md").write_text("stuck\n")
+    _git(["add", "."], cfg.home); _git(["commit", "-q", "-m", "stuck"], cfg.home)
+    _git(["checkout", "-q", "main"], cfg.home)
+    assert mind.cmd_proposals(cfg) == [("propose/2026-09-12-stuck", "(unpushed)")]
+
+
+def test_cmd_proposals_omits_merged_and_deleted_remote_branch(repo, tmp_path, monkeypatch):
+    """H2: once a proposal's PR merges and the remote branch is deleted (GitHub
+    auto-delete, or by hand), the surviving local branch must stop being
+    reported as "(unpushed)" forever, and must itself be cleaned up."""
+    cfg, bare, seed = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    _git(["fetch", "-q", "origin", "propose/2026-09-12-x"], seed)
+    _git(["merge", "-q", "--ff-only", "origin/propose/2026-09-12-x"], seed)
+    _git(["push", "-q"], seed)
+    _git(["push", "-q", "origin", "--delete", "propose/2026-09-12-x"], seed)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    assert mind.cmd_proposals(cfg) == []
+    assert _git(["branch", "--list", "propose/2026-09-12-x"], cfg.home).stdout.strip() == ""
+
+
+def test_cmd_proposals_omits_merged_but_kept_remote_branch(repo, tmp_path, monkeypatch):
+    """H2 sibling: a merged remote branch GitHub (or the owner) never deletes
+    must also stop nagging, even though it is still listed on the remote."""
+    cfg, bare, seed = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    _git(["fetch", "-q", "origin", "propose/2026-09-12-x"], seed)
+    _git(["merge", "-q", "--ff-only", "origin/propose/2026-09-12-x"], seed)
+    _git(["push", "-q"], seed)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    assert mind.cmd_proposals(cfg) == []
+
+
+def test_cmd_proposals_missing_origin_main_still_lists_remote_proposal(repo, monkeypatch):
+    """SF1/PR-1: origin/main can be absent locally (a pruned ref, a fetch
+    that never landed) yet an open proposal must not vanish from the
+    list -- every --merged/--no-merged origin/main query would otherwise
+    exit non-zero with empty stdout and `proposals` would report zero."""
+    cfg, _, seed = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    _git(["checkout", "-q", "-b", "propose/2026-09-12-x"], seed)
+    (seed / "z.md").write_text("z\n")
+    _git(["add", "."], seed)
+    _git(["commit", "-q", "-m", "z"], seed)
+    _git(["push", "-q", "-u", "origin", "propose/2026-09-12-x"], seed)
+    _git(["fetch", "-q", "origin"], cfg.home)   # pick up the new remote branch once, normally
+    _git(["update-ref", "-d", "refs/remotes/origin/main"], cfg.home)
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args == ["fetch", "-q", "--prune"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    rows = mind.cmd_proposals(cfg)
+    assert ("propose/2026-09-12-x", "") in rows
+
+
+def test_cmd_proposals_default_branch_trunk_works(tmp_path, monkeypatch):
+    """SF1/PR-1: the default branch is resolved from origin/HEAD, not
+    hardcoded to "main" -- a merged proposal on a `trunk`-default data repo
+    must still be excluded, and an unmerged one still included."""
+    bare = tmp_path / "remote.git"
+    _git(["init", "--bare", "-q", "--initial-branch=trunk", str(bare)], tmp_path)
+    seed = tmp_path / "seed"
+    _git(["clone", "-q", str(bare), str(seed)], tmp_path)
+    _git(["config", "user.email", "t@example.com"], seed)
+    _git(["config", "user.name", "t"], seed)
+    (seed / "schema.md").write_text("# schema\n")
+    _git(["add", "."], seed)
+    _git(["commit", "-q", "-m", "init"], seed)
+    _git(["push", "-q", "origin", "trunk"], seed)
+    home = tmp_path / "home"
+    env = {"MIND_REPO": str(bare), "MIND_HOME": str(home)}
+    cfg = mind.Config.from_env(env, tmp_path)
+    assert mind.ensure_checkout(cfg) is None
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+
+    _git(["checkout", "-q", "-b", "propose/2026-09-12-merged"], seed)
+    (seed / "m.md").write_text("m\n")
+    _git(["add", "."], seed)
+    _git(["commit", "-q", "-m", "m"], seed)
+    _git(["push", "-q", "-u", "origin", "propose/2026-09-12-merged"], seed)
+    _git(["checkout", "-q", "trunk"], seed)
+    _git(["merge", "-q", "--ff-only", "propose/2026-09-12-merged"], seed)
+    _git(["push", "-q"], seed)
+
+    _git(["checkout", "-q", "-b", "propose/2026-09-12-open"], seed)
+    (seed / "o.md").write_text("o\n")
+    _git(["add", "."], seed)
+    _git(["commit", "-q", "-m", "o"], seed)
+    _git(["push", "-q", "-u", "origin", "propose/2026-09-12-open"], seed)
+
+    assert mind.cmd_proposals(cfg) == [("propose/2026-09-12-open", "")]
+
+
+def test_cmd_propose_sibling_id_from_unpushed_local_branch_is_skipped(repo, tmp_path, monkeypatch):
+    """SF8: a prior batch whose push failed exists only as a local
+    refs/heads/propose/* branch; the next batch must not reassign the ID
+    it already claimed there -- previously only origin/propose/* was
+    scanned."""
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    _git(["checkout", "-q", "-b", "propose/2026-09-12-stuck"], cfg.home)
+    note = mind.render_frontmatter(
+        {"id": "PRIN-TEST-001", "title": "Stuck", "type": "principle", "stage": "testing", "scope": "global",
+         "strength": "must", "status": "accepted", "affirmed": "2026-09-12", "supersedes": None, "source": "t"},
+        "stuck.\n")
+    notes_dir = cfg.home / "global" / "notes"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    (notes_dir / "PRIN-TEST-001-stuck.md").write_text(note)
+    _git(["add", "."], cfg.home)
+    _git(["commit", "-q", "-m", "stuck"], cfg.home)
+    _git(["checkout", "-q", "main"], cfg.home)
+
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "digest-run", "global", None, None, tmp_path)
+    assert out == "mind: proposed 1 note on propose/2026-09-12-digest-run, PR https://example.test/pr/7"
+    log = _git(["log", "--format=%s", "propose/2026-09-12-digest-run"], bare).stdout
+    assert "mind: propose PRIN-TEST-002" in log
+
+
+def test_cmd_propose_fetch_failure_returncode_reports_local_copy_and_proceeds(repo, tmp_path, monkeypatch):
+    """SF8: a fetch that returns a plain error (not a timeout) must be
+    caught too -- propose proceeds from the local copy of origin/main and
+    says so, instead of only handling TimeoutExpired."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args == ["fetch", "-q", "origin"]:
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="fatal: unable to access\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert out == ("mind: fetch failed, proposing from the local copy; "
+                    "mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7")
+
+
+def test_cmd_propose_concurrent_inject_sees_no_unmerged_note(repo, tmp_path, monkeypatch):
+    """Step 3b concurrency test: while cmd_propose is mid-flight, an inject
+    running against the shared checkout must never see the unmerged note."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    captured = {}
+
+    def fake_gh(c, args, cwd, timeout=20):
+        if args[:2] == ["pr", "create"]:
+            captured["inject"] = mind.cmd_inject(cfg, "compact", tmp_path)
+            return subprocess.CompletedProcess(args, 0, "https://example.test/pr/1\n", "")
+        if args[:2] == ["pr", "list"]:
+            return subprocess.CompletedProcess(args, 0, "[]", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(mind, "_gh", fake_gh)
+    d = tmp_path / "a.md"
+    d.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d], "concurrency test", "global", None, None, tmp_path)
+    assert "Tests must assert concrete values" not in captured["inject"]
+
+
+def test_cmd_propose_removes_worktree_on_commit_failure(repo, tmp_path, monkeypatch):
+    """Given the first draft commits fine but the second draft's commit
+    fails / the worktree must still be removed via the `finally` clause."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
+    d2 = tmp_path / "b.md"; d2.write_text(DRAFT.replace("Tests must assert concrete values", "Second claim"))
+    real_commit_all = mind.commit_all
+    calls = {"n": 0}
+
+    def flaky_commit(c, message):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return subprocess.CompletedProcess(args=["git", "commit"], returncode=1, stdout="", stderr="hook declined\n")
+        return real_commit_all(c, message)
+
+    monkeypatch.setattr(mind, "commit_all", flaky_commit)
+    with pytest.raises(mind.ValidationError, match="commit failed: hook declined"):
+        mind.cmd_propose(cfg, [d1, d2], "x", "global", None, None, tmp_path)
+    assert not list(cfg.home.parent.glob("worktree-*"))
+    assert _git(["worktree", "list"], cfg.home).stdout.count("\n") == 1
+
+
+def test_cmd_propose_reports_worktree_cleanup_failure_but_keeps_pr_result(repo, tmp_path, monkeypatch):
+    """SF7: a failed worktree removal (a locked ref, e.g.) must be visible
+    to the owner -- previously nothing was printed and a stale worktree
+    was silently left behind."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:2] == ["worktree", "remove"]:
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="fatal: locked\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    wt = mind._worktree_path(cfg, "propose/2026-09-12-x")
+    assert out == (f"mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+                    f"; worktree cleanup failed, remove {wt} by hand")
+
+
+def test_cmd_propose_worktree_cleanup_timeout_does_not_eat_success(repo, tmp_path, monkeypatch):
+    """SF7: the finally clause's own worktree remove/prune calls used to be
+    unguarded -- a TimeoutExpired there replaced an already-successful
+    result with an uncaught traceback, even though the PR was genuinely
+    open. It must instead append the cleanup warning to that result."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:2] == ["worktree", "remove"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    wt = mind._worktree_path(cfg, "propose/2026-09-12-x")
+    assert out == (f"mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+                    f"; worktree cleanup failed, remove {wt} by hand")
+    assert list(cfg.home.parent.glob("worktree-*"))   # genuinely left behind
+
+
+def test_cmd_propose_push_failure_keeps_branch_locally(repo, tmp_path, monkeypatch):
+    """Given the branch's `git push` fails / cmd_propose returns the
+    committed-locally message, removes the worktree, and the branch
+    survives locally per spec section 11."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:1] == ["push"]:
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="fatal: push failed\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert out == "mind: proposal branch propose/2026-09-12-x is committed locally; push failed"
+    assert not list(cfg.home.parent.glob("worktree-*"))
+    assert _git(["branch", "--list", "propose/2026-09-12-x"], cfg.home).stdout.strip() == "propose/2026-09-12-x"
+
+
+def test_cmd_propose_push_timeout_returns_spec_message_and_removes_worktree(repo, tmp_path, monkeypatch):
+    """M2: a push that hangs must produce the spec'd committed-locally
+    message (and remove the worktree), not a raw TimeoutExpired traceback."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:1] == ["push"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert out == "mind: proposal branch propose/2026-09-12-x is committed locally; push failed"
+    assert not list(cfg.home.parent.glob("worktree-*"))
+
+
+def test_cmd_propose_fetch_timeout_proceeds_from_local_origin_main(repo, tmp_path, monkeypatch):
+    """M2: a fetch that hangs is offline, not fatal -- propose must proceed
+    from whatever origin/main the local checkout already has."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:2] == ["fetch", "-q"] and args != ["fetch", "-q", "--prune"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert out == "mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+
+
+def test_cmd_propose_retries_after_failed_push_reusing_local_branch(repo, tmp_path, monkeypatch):
+    """H3: after a failed push the branch exists locally only. Proposing
+    again the same day under the same topic (the digest skill's topic is
+    always `digest-<date>`, so a retry is the same topic by construction)
+    must append to that branch rather than die on `worktree add -b` because
+    the branch already exists, and must push everything out."""
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    real_git = mind.git
+    fail = {"on": True}
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:1] == ["push"] and fail["on"]:
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="fatal: push failed\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
+    out1 = mind.cmd_propose(cfg, [d1], "x", "global", None, None, tmp_path)
+    assert out1 == "mind: proposal branch propose/2026-09-12-x is committed locally; push failed"
+
+    fail["on"] = False
+    d2 = tmp_path / "b.md"; d2.write_text(DRAFT.replace("Tests must assert concrete values", "Second claim"))
+    out2 = mind.cmd_propose(cfg, [d2], "x", "global", None, None, tmp_path)
+    assert out2 == "mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+    log = _git(["log", "--format=%s", "propose/2026-09-12-x", "-2"], bare).stdout.splitlines()
+    assert log == ["mind: propose PRIN-TEST-002 Second claim", "mind: propose PRIN-TEST-001 Tests must assert concrete values"]
+
+
+def test_cmd_propose_reuses_existing_branch_and_pr(repo, tmp_path, monkeypatch):
+    """Given propose/2026-09-12-x already exists on origin with PRIN-TEST-001
+    (from a prior cmd_propose call) / a second cmd_propose call omits -b from
+    worktree add, both notes land on the branch, and no new pr create call
+    is made (the existing PR is reused)."""
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    fake = FakeGh()
+    monkeypatch.setattr(mind, "_gh", fake)
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
+    out1 = mind.cmd_propose(cfg, [d1], "x", "global", None, None, tmp_path)
+    assert out1 == "mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+    fake.existing = [{"headRefName": "propose/2026-09-12-x", "url": "https://example.test/pr/7"}]
+
+    captured = {}
+    real_git = mind.git
+
+    def spy(c, args, cwd, timeout):
+        if args[:2] == ["worktree", "add"]:
+            captured["args"] = args
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", spy)
+    calls_before = len(fake.calls)
+    d2 = tmp_path / "b.md"; d2.write_text(DRAFT.replace("Tests must assert concrete values", "Second claim"))
+    out2 = mind.cmd_propose(cfg, [d2], "x", "global", None, None, tmp_path)
+    assert out2 == "mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+    assert "-b" not in captured["args"]
+    new_calls = fake.calls[calls_before:]
+    assert [c for c in new_calls if c[:2] == ["pr", "create"]] == []
+    log = _git(["log", "--format=%s", "propose/2026-09-12-x", "-2"], bare).stdout.splitlines()
+    assert log == ["mind: propose PRIN-TEST-002 Second claim", "mind: propose PRIN-TEST-001 Tests must assert concrete values"]
+
+
+def test_cmd_propose_raises_when_worktree_add_fails_for_existing_remote_branch(repo, tmp_path, monkeypatch):
+    """M3: the remote-exists path resets onto origin/<branch> with a single
+    atomic `worktree add -B`; a failure there (a locked ref, a leftover
+    worktree) must raise instead of silently leaving a detached HEAD that
+    still reports success."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d1], "x", "global", None, None, tmp_path)   # branch now exists on origin
+
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:1] == ["worktree"] and "-B" in args:
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="fatal: reference is locked\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d2 = tmp_path / "b.md"; d2.write_text(DRAFT.replace("Tests must assert concrete values", "Second claim"))
+    with pytest.raises(mind.ValidationError, match="worktree failed: fatal: reference is locked"):
+        mind.cmd_propose(cfg, [d2], "x", "global", None, None, tmp_path)
+    assert not list(cfg.home.parent.glob("worktree-*"))
+
+
+def test_cmd_propose_starts_from_fresh_origin_main_not_stale_local(repo, tmp_path, seed_note, monkeypatch):
+    """Given origin/main already has PRIN-TEST-001 pushed directly via seed
+    while cfg.home's local main is stale/behind / the assigned ID is
+    PRIN-TEST-002, proving the worktree started from freshly-fetched
+    origin/main, not cfg.home's stale local main."""
+    cfg, bare, seed = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    seed_note(seed, "global/notes/PRIN-TEST-001-other.md", "PRIN-TEST-001", "Other")
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert out == "mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+    log = _git(["log", "--format=%s", "propose/2026-09-12-x", "-1"], bare).stdout.splitlines()
+    assert log == ["mind: propose PRIN-TEST-002 Tests must assert concrete values"]
+
+
+def test_cmd_propose_starts_from_head_when_no_upstream_and_no_propose_branch(tmp_path, monkeypatch):
+    """Task 2 Boundary: a brand-new data repo (main never pushed, so no
+    upstream tracking branch exists yet) and no propose/* branch anywhere
+    must still succeed, starting the worktree from HEAD rather than a
+    nonexistent origin/main."""
+    bare = tmp_path / "remote.git"
+    _git(["init", "--bare", "-q", "--initial-branch=main", str(bare)], tmp_path)
+    home = tmp_path / "home"
+    env = {"MIND_REPO": str(bare), "MIND_HOME": str(home)}
+    cfg = mind.Config.from_env(env, tmp_path)
+    assert mind.ensure_checkout(cfg) is None
+    (cfg.home / "schema.md").write_text("# schema\n")
+    mind.commit_all(cfg, "mind: seed")   # local-only commit, never pushed
+    assert not mind._has_upstream(cfg)
+
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    captured = {}
+    real_git = mind.git
+
+    def spy(c, args, cwd, timeout):
+        if args[:2] == ["worktree", "add"]:
+            captured["args"] = args
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", spy)
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert out == "mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+    assert captured["args"][-1] == "HEAD"
+
+
+def test_cmd_propose_avoids_id_claimed_by_sibling_unmerged_proposal_branch(repo, tmp_path, monkeypatch):
+    """M1: two proposals from different topics on the same day, both starting
+    fresh from origin/main (neither merged yet), must never assign the same
+    ID -- the second call scans other unmerged propose/* branches' note
+    filenames for IDs before assigning."""
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d1], "digest-run", "global", None, None, tmp_path)
+    log1 = _git(["log", "--format=%s", "propose/2026-09-12-digest-run"], bare).stdout
+    assert "mind: propose PRIN-TEST-001 Tests must assert concrete values" in log1
+
+    d2 = tmp_path / "b.md"; d2.write_text(DRAFT.replace("Tests must assert concrete values", "Second claim"))
+    mind.cmd_propose(cfg, [d2], "revise-something", "global", None, None, tmp_path)
+    log2 = _git(["log", "--format=%s", "propose/2026-09-12-revise-something"], bare).stdout
+    assert "mind: propose PRIN-TEST-002 Second claim" in log2
+
+
+def test_cmd_propose_unmerged_note_invisible_to_ask_on_main(repo, tmp_path, monkeypatch):
+    """Cross-layer: a proposed note -- including one with a duplicate-
+    looking title or a `supersedes` target -- must never surface through
+    `ask` or `lint` on the shared checkout before the proposal branch is
+    merged (test-review Blockers 1 and 2)."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Tests must assert concrete values", "existing note, duplicate title target")
+    _add(cfg, tmp_path, "Old rule", "still accepted until the propose branch merges")
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d1 = tmp_path / "a.md"; d1.write_text(DRAFT)   # duplicate title of the note added above
+    d2 = tmp_path / "b.md"
+    d2.write_text("---\ntitle: New rule\ntype: preference\nstage: review\nstrength: should\n"
+                  "supersedes: PREF-REV-002\n---\nnew\n")
+    mind.cmd_propose(cfg, [d1, d2], "x", "global", None, None, tmp_path)
+    # "weak"/"hide" are unique to DRAFT's own body (never in the duplicate-
+    # titled note's body, which shares only the title): a hit here would mean
+    # the unmerged note leaked, not the legitimate pre-existing duplicate.
+    assert mind.cmd_ask(cfg, ["weak", "hide"], False, None, False, tmp_path) == \
+        "mind: no note matches 'weak hide'"
+    lint_out = mind.cmd_lint(cfg, 180)
+    assert "duplicate:" not in lint_out
+    assert "unsuperseded:" not in lint_out
+    assert "PRIN-TEST-001" not in lint_out
+    old = mind._find_note(cfg, "PREF-REV-002")
+    assert old.status == "accepted"
+
+
+def test_cmd_propose_note_appears_after_branch_is_merged(repo, tmp_path, monkeypatch):
+    """Cross-layer: the trust boundary flips only on merge — after the
+    branch is merged into main and synced down, ask finds the note."""
+    cfg, bare, seed = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    _git(["fetch", "-q", "origin", "propose/2026-09-12-x"], seed)
+    _git(["merge", "-q", "--ff-only", "origin/propose/2026-09-12-x"], seed)
+    _git(["push", "-q"], seed)
+    assert mind.sync(cfg) is None
+    out = mind.cmd_ask(cfg, ["assert", "concrete"], False, None, False, tmp_path)
+    assert "PRIN-TEST-001 | Tests must assert concrete values" in out
+
+
+def _capture(env, payload, cwd):
+    return subprocess.run(["sh", str(PLUGIN / "scripts" / "capture.sh")], env=env, input=json.dumps(payload),
+                          capture_output=True, text=True, cwd=cwd)
+
+
+def test_capture_writes_one_json_line(repo, tmp_path):
+    cfg, _, _ = repo
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    proc = _capture(env, {"session_id": "s1", "prompt": "never use em dashes in output", "cwd": str(tmp_path)}, tmp_path)
+    assert proc.returncode == 0 and proc.stdout == ""
+    lines = (cfg.home.parent / "pending.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["session"] == "s1" and row["prompt"] == "never use em dashes in output"
+    assert row["project"] == tmp_path.name.lower() and row["cwd"] == str(tmp_path)
+    assert row["ts"].endswith("Z") and len(row["ts"]) == 20
+
+
+def test_capture_masks_credential_shapes_in_prompt(repo, tmp_path):
+    """M5: a prompt carrying a pasted credential must never sit in clear
+    text in the pending file, which nothing else ever scrubs."""
+    cfg, _, _ = repo
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    token = "ghp_" + "a" * 36
+    proc = _capture(env, {"session_id": "s1", "prompt": f"use this token {token} to auth", "cwd": str(tmp_path)}, tmp_path)
+    assert proc.returncode == 0
+    row = json.loads((cfg.home.parent / "pending.jsonl").read_text().splitlines()[0])
+    assert token not in row["prompt"]
+    assert "use this token *** to auth" == row["prompt"]
+
+
+def test_mask_credential_shapes_covers_todays_common_prefixes():
+    """SEC-H1/PR-5: the credential shape list covered only ghp_ (fixed 36
+    chars), sk-ant-, AKIA, PEM, and userinfo URLs -- it missed today's
+    common shapes, which were written to pending.jsonl verbatim and could
+    reach a public PR body via /mind:digest -> propose. One shape each."""
+    cases = {
+        "a GitHub fine-grained PAT": "github_pat_" + "a" * 30,
+        "a GitHub OAuth token": "gho_" + "b" * 30,
+        "a GitHub user-to-server token": "ghu_" + "c" * 30,
+        "a bare sk- shaped secret key": "sk-" + "d" * 30,
+        "a Slack bot token": "xoxb-" + "1234567890abc",
+        "a Google API key": "AIza" + "e" * 35,
+        "an AWS STS temporary access key id": "ASIA" + "F" * 16,
+        "a JWT": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dQw4w9WgXcQ_abcdefghij",
+    }
+    for label, token in cases.items():
+        masked = mind._mask_credential_shapes(f"here is the token: {token} end")
+        assert token not in masked, f"{label} not masked: {token}"
+
+
+def test_mask_credential_shapes_masks_40_char_secret_next_to_akia_marker():
+    """SEC-H1: the 40-char AWS secret key normally pasted next to the AKIA
+    access key id it accompanies must be masked too -- previously only the
+    AKIA id itself was."""
+    secret = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEYx1"
+    assert len(secret) == 40
+    line = f"AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE AWS_SECRET_ACCESS_KEY={secret}"
+    masked = mind._mask_credential_shapes(line)
+    assert secret not in masked
+    assert "AKIAIOSFODNN7EXAMPLE" not in masked
+
+
+def test_mask_credential_shapes_masks_40_char_secret_next_to_aws_secret_marker():
+    """SEC-H1: the same 40-char rule fires off the literal "aws_secret"
+    marker too, not only "AKIA"."""
+    secret = "a" * 40
+    line = f"aws_secret_access_key: {secret}"
+    masked = mind._mask_credential_shapes(line)
+    assert secret not in masked
+
+
+def test_redact_applies_credential_shape_masking(repo):
+    """SEC-M2: _redact skipped shape masking entirely, applying only the
+    userinfo-URL pattern -- doctor's remote: line and propose's worktree/
+    push errors echo git/gh stderr, which can carry a bare token string."""
+    cfg, _, _ = repo
+    token = "ghp_" + "a" * 36
+    redacted = mind._redact(f"remote: unauthorized, token {token} rejected", cfg)
+    assert token not in redacted
+
+
+def test_doctor_remote_line_masks_ghp_token_in_stderr(repo, monkeypatch):
+    """SEC-M2 pinned test: doctor's remote: line with a ghp_ token in
+    stderr is masked."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    token = "ghp_" + "a" * 36
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (False, f"fatal: bad credentials {token}"))
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    out = mind.cmd_doctor(cfg)
+    assert token not in out
+
+
+def test_capture_skips_slash_and_short_and_is_inert_without_repo(repo, tmp_path):
+    cfg, _, _ = repo
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    _capture(env, {"session_id": "s", "prompt": "/mind:ask threads", "cwd": str(tmp_path)}, tmp_path)
+    _capture(env, {"session_id": "s", "prompt": "ok thanks", "cwd": str(tmp_path)}, tmp_path)
+    assert not (cfg.home.parent / "pending.jsonl").exists()
+    env2 = {k: v for k, v in env.items() if k != "MIND_REPO"}
+    proc = _capture(env2, {"session_id": "s", "prompt": "a long enough prompt here", "cwd": str(tmp_path)}, tmp_path)
+    assert proc.returncode == 0 and not (cfg.home.parent / "pending.jsonl").exists()
+
+
+def test_capture_caps_file_at_two_megabytes(repo, tmp_path):
+    cfg, _, _ = repo
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.write_text(("{\"ts\": \"2026-01-01T00:00:00Z\", \"prompt\": \"" + "x" * 1000 + "\"}\n") * 2200)
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    _capture(env, {"session_id": "s", "prompt": "the newest prompt of them all", "cwd": str(tmp_path)}, tmp_path)
+    lines = pending.read_text().splitlines()
+    assert 1100 <= len(lines) <= 1102
+    assert json.loads(lines[-1])["prompt"] == "the newest prompt of them all"
+
+
+def test_capture_creates_pending_file_with_0600_permissions(repo, tmp_path):
+    """SEC-M1: pending.jsonl was created with the default umask (typically
+    0o644, world-readable) and never chmod'd anywhere -- every prompt the
+    owner ever types lands there in clear text."""
+    cfg, _, _ = repo
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    _capture(env, {"session_id": "s1", "prompt": "never use em dashes in output", "cwd": str(tmp_path)}, tmp_path)
+    pending = cfg.home.parent / "pending.jsonl"
+    assert (pending.stat().st_mode & 0o777) == 0o600
+
+
+def test_read_and_mark_pending(repo):
+    cfg, _, _ = repo
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.write_text('{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n{"ts": "2026-09-12T11:00:00Z", "prompt": "two"}\n')
+    assert [r["prompt"] for r in mind.read_pending(cfg, None, 200)] == ["one", "two"]
+    mind.mark_pending(cfg, "2026-09-12T10:00:00Z")
+    assert (cfg.home.parent / "pending.jsonl.processed").read_text() == "2026-09-12T10:00:00Z\n"
+    assert [r["prompt"] for r in mind.read_pending(cfg, None, 200)] == ["two"]
+    assert mind.read_pending(cfg, "2026-09-12T11:00:00Z", 200) == []
+
+
+def test_mark_pending_rejects_malformed_timestamp(repo):
+    """L: a typo'd `--mark` value (e.g. "2026-9-12") compares wrongly as a
+    plain string against ISO timestamps and would re-surface or hide
+    prompts silently; validate the shape instead of writing it."""
+    cfg, _, _ = repo
+    with pytest.raises(mind.ValidationError, match="invalid timestamp"):
+        mind.mark_pending(cfg, "2026-9-12")
+    assert not mind._watermark_file(cfg).exists()
+
+
+def test_clear_pending_truncates_file_and_keeps_watermark(repo):
+    """M5: `pending --clear` empties the captured-prompt file (which can
+    carry pasted secrets) without touching the watermark, so the digest
+    skill can purge it after marking."""
+    cfg, _, _ = repo
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.write_text('{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n')
+    mind.mark_pending(cfg, "2026-09-12T10:00:00Z")
+    mind.clear_pending(cfg)
+    assert pending.read_text() == ""
+    assert (cfg.home.parent / "pending.jsonl.processed").read_text() == "2026-09-12T10:00:00Z\n"
+
+
+def test_clear_pending_deletes_only_rows_at_or_before_watermark(repo):
+    """SF3/PR-3: `pending --clear` must drop only rows up to the watermark,
+    never rows a concurrent session appended after the last --mark (the
+    digest skill's own pending -> propose -> --mark -> --clear sequence)."""
+    cfg, _, _ = repo
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.write_text('{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n'
+                        '{"ts": "2026-09-12T11:00:00Z", "prompt": "two"}\n')
+    mind.mark_pending(cfg, "2026-09-12T10:00:00Z")
+    with pending.open("a", encoding="utf-8") as fh:
+        fh.write('{"ts": "2026-09-12T12:00:00Z", "prompt": "three"}\n')
+    assert mind.clear_pending(cfg) is True
+    rows = [json.loads(line) for line in pending.read_text().splitlines()]
+    assert [r["prompt"] for r in rows] == ["two", "three"]
+
+
+def test_clear_pending_with_no_watermark_deletes_nothing(repo):
+    """SF3/PR-3: a bare --clear with no watermark at all must not destroy
+    unprocessed prompts nobody has mined yet."""
+    cfg, _, _ = repo
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.write_text('{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n')
+    assert mind.clear_pending(cfg) is False
+    assert pending.read_text() == '{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n'
+
+
+def test_main_pending_clear_with_no_watermark_reports_nothing(repo, capsys):
+    cfg, _, _ = repo
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    pending.write_text('{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n')
+    rc = mind.main(["pending", "--clear"], env={"MIND_REPO": cfg.repo, "MIND_HOME": str(cfg.home)}, cwd=cfg.home)
+    assert rc == 0
+    assert capsys.readouterr().out == "mind: nothing marked, nothing cleared\n"
+    assert pending.read_text() == '{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n'
+
+
+def test_main_pending_mark_and_clear_together_runs_both(repo, capsys):
+    """SF3/PR-3: `pending --mark X --clear` previously took only the mark
+    branch and silently ignored --clear."""
+    cfg, _, _ = repo
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    pending.write_text('{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n')
+    rc = mind.main(["pending", "--mark", "2026-09-12T10:00:00Z", "--clear"],
+                   env={"MIND_REPO": cfg.repo, "MIND_HOME": str(cfg.home)}, cwd=cfg.home)
+    assert rc == 0
+    assert capsys.readouterr().out == "mind: pending marked at 2026-09-12T10:00:00Z, pending cleared\n"
+    assert pending.read_text() == ""
+
+
+def test_capture_ignores_malformed_json_stdin(repo, tmp_path):
+    """A malformed hook payload must never crash the hook or raise past
+    main's try/except; it is simply dropped."""
+    cfg, _, _ = repo
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    proc = subprocess.run(["sh", str(PLUGIN / "scripts" / "capture.sh")], env=env, input="not valid json{",
+                          capture_output=True, text=True, cwd=tmp_path)
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert not (cfg.home.parent / "pending.jsonl").exists()
+
+
+def test_capture_defaults_cwd_when_payload_omits_it(repo, tmp_path):
+    """A payload with no "cwd" key must fall back to the subprocess's own
+    cwd, never the literal string "None"."""
+    cfg, _, _ = repo
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    _capture(env, {"session_id": "s1", "prompt": "never use em dashes ever again please"}, tmp_path)
+    row = json.loads((cfg.home.parent / "pending.jsonl").read_text().splitlines()[0])
+    assert row["cwd"] == str(tmp_path)
+
+
+def test_capture_resolves_project_from_payload_cwd_not_the_session_cwd(repo, tmp_path):
+    """M7: two prompts captured in the same session, each naming a
+    different project's directory in the payload's own "cwd" field, must
+    each get their own project slug -- independent of the subprocess's own
+    (session) working directory, which is the same for both calls here."""
+    cfg, _, _ = repo
+    proj_a = tmp_path / "proj-a"; proj_a.mkdir()
+    proj_b = tmp_path / "proj-b"; proj_b.mkdir()
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    _capture(env, {"session_id": "s", "prompt": "a prompt captured from project a", "cwd": str(proj_a)}, tmp_path)
+    _capture(env, {"session_id": "s", "prompt": "a prompt captured from project b", "cwd": str(proj_b)}, tmp_path)
+    rows = [json.loads(l) for l in (cfg.home.parent / "pending.jsonl").read_text().splitlines()]
+    assert rows[0]["project"] == "proj-a" and rows[0]["cwd"] == str(proj_a)
+    assert rows[1]["project"] == "proj-b" and rows[1]["cwd"] == str(proj_b)
+
+
+def test_capture_preserves_non_ascii_and_emoji_unescaped(repo, tmp_path):
+    """The written line must carry literal UTF-8 bytes (ensure_ascii=False),
+    not \\uXXXX escapes, and round-trip exactly through json.loads."""
+    cfg, _, _ = repo
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    prompt = "siempre usa é acentos y emoji 😀 en las notas"
+    _capture(env, {"session_id": "s1", "prompt": prompt, "cwd": str(tmp_path)}, tmp_path)
+    line = (cfg.home.parent / "pending.jsonl").read_text().splitlines()[0]
+    assert "é" in line and "😀" in line
+    assert "\\u" not in line
+    assert json.loads(line)["prompt"] == prompt
+
+
+def test_stale_affirm_retire(repo, tmp_path, monkeypatch):
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Old should rule", "o")
+    _add(cfg, tmp_path, "Old must rule", "m")
+    for p in mind.global_notes_dir(cfg).glob("*.md"):
+        t = p.read_text().replace(f"affirmed: {dt.date.today().isoformat()}", "affirmed: 2026-01-01")
+        if "Old must" in t:
+            t = t.replace("strength: should", "strength: must")
+        p.write_text(t)
+    monkeypatch.setattr(mind, "_today", lambda: "2026-07-01")
+    out = mind.cmd_stale(cfg, 90, False, tmp_path)
+    assert out == ("PREF-REV-001 | Old should rule | global | should | 2026-01-01 | 181 days\n"
+                   "PREF-REV-002 | Old must rule | global | must (must, no decay) | 2026-01-01 | 181 days\n")
+    assert mind.cmd_affirm(cfg, "PREF-REV-001", "default") == "mind: affirmed PREF-REV-001 (strength default), pushed"
+    meta, _ = mind.parse_frontmatter(next(mind.global_notes_dir(cfg).glob("PREF-REV-001-*.md")).read_text())
+    assert meta["affirmed"] == "2026-07-01" and meta["strength"] == "default"
+    assert mind.cmd_retire(cfg, "PREF-REV-002") == "mind: retired PREF-REV-002, pushed"
+    assert mind.cmd_stale(cfg, 90, False, tmp_path) == "mind: nothing stale"
+    assert _git(["log", "--format=%s", "main", "-2"], bare).stdout.splitlines() == ["mind: retire PREF-REV-002", "mind: affirm PREF-REV-001"]
+
+
+def test_stale_prints_no_affirmed_date_for_null_affirmed_and_sorts_first(repo, tmp_path, monkeypatch):
+    """L: `affirmed: null` is valid per validate_meta, but must read as "no
+    affirmed date", not "(1000000 days)" -- and such notes sort first."""
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    _add(cfg, tmp_path, "Has date", "d")
+    for p in mind.global_notes_dir(cfg).glob("*.md"):
+        t = p.read_text().replace(f"affirmed: {dt.date.today().isoformat()}", "affirmed: 2026-01-01")
+        p.write_text(t)
+    _raw_note(cfg, "PREF-REV-002-null.md", id="PREF-REV-002", title="Null affirmed", affirmed=None)
+    monkeypatch.setattr(mind, "_today", lambda: "2026-07-01")
+    out = mind.cmd_stale(cfg, 90, False, tmp_path)
+    lines = out.splitlines()
+    assert lines[0] == "PREF-REV-002 | Null affirmed | global | should | none | no affirmed date"
+    assert lines[1] == "PREF-REV-001 | Has date | global | should | 2026-01-01 | 181 days"
+
+
+def _raw_note(cfg, name, **over):
+    meta = {"id": "PREF-REV-001", "title": "T", "type": "preference", "stage": "review", "scope": "global",
+            "strength": "should", "status": "accepted", "affirmed": "2026-09-01", "supersedes": None, "source": "t"}
+    meta.update(over)
+    p = mind.global_notes_dir(cfg) / name
+    p.write_text(mind.render_frontmatter(meta, "body\n"))
+    return p
+
+
+def test_lint_clean(repo, tmp_path):
+    cfg, _, _ = repo; mind.cmd_init(cfg); _add(cfg, tmp_path, "Fine", "f")
+    assert mind.cmd_lint(cfg, 180) == "mind: lint clean\n"
+
+
+def test_lint_rows(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    _raw_note(cfg, "PREF-REV-001-t.md")
+    _raw_note(cfg, "PREF-REV-002-t.md", id="PREF-REV-002", title="T")            # duplicate title
+    _raw_note(cfg, "PREF-REV-003-x.md", id="PREF-REV-003", title="X", supersedes="PREF-REV-001")   # 001 still accepted
+    _raw_note(cfg, "PREF-REV-004-y.md", id="PREF-REV-004", title="Y", supersedes="PREF-REV-999")   # dangling
+    _raw_note(cfg, "PREF-REV-005-z.md", id="PREF-REV-006", title="Z")            # id/filename mismatch
+    _raw_note(cfg, "PREF-REV-007-w.md", id="PREF-REV-007", title="W", stage="wish")   # malformed
+    _raw_note(cfg, "PREF-REV-008-old.md", id="PREF-REV-008", title="Old", affirmed="2025-01-01")
+    mind._ensure_project(cfg, "stubby")
+    out = mind.cmd_lint(cfg, 180)
+    assert out == (
+        "malformed: global/notes/PREF-REV-007-w.md: stage must be one of: identity, product, planning, development, testing, review, release, deployment, monitoring, security\n"
+        "mismatch: global/notes/PREF-REV-005-z.md id=PREF-REV-006\n"
+        "dangling: PREF-REV-004 supersedes PREF-REV-999\n"
+        "unsuperseded: PREF-REV-001 (by PREF-REV-003)\n"
+        "duplicate: PREF-REV-001 and PREF-REV-002\n"
+        "stub: stubby\n"
+        "stale: PREF-REV-008 (619 days)\n"
+        "mind: lint found 7 issues\n"
+    )
+
+
+def test_lint_reports_duplicate_id_across_different_files(repo):
+    """M1: two note files sharing the same frontmatter `id` (e.g. sibling
+    unmerged proposals that both assigned the next free ID and then both
+    merged) must be flagged, or `_find_note`/affirm/retire silently pick
+    whichever sorts first."""
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    _raw_note(cfg, "PREF-REV-001-a.md", title="A")
+    _raw_note(cfg, "PREF-REV-001-b.md", title="B")
+    out = mind.cmd_lint(cfg, 180)
+    assert "duplicate id: global/notes/PREF-REV-001-a.md and global/notes/PREF-REV-001-b.md\n" in out
+
+
+def test_lint_duplicate_id_row_between_mismatch_and_dangling(repo):
+    """The row order the ruling pins: malformed, mismatch, duplicate id,
+    dangling, ..."""
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    _raw_note(cfg, "PREF-REV-001-a.md", title="A")
+    _raw_note(cfg, "PREF-REV-001-b.md", title="B")
+    _raw_note(cfg, "PREF-REV-005-z.md", id="PREF-REV-006", title="Z")   # mismatch
+    _raw_note(cfg, "PREF-REV-004-y.md", id="PREF-REV-004", title="Y", supersedes="PREF-REV-999")   # dangling
+    lines = mind.cmd_lint(cfg, 180).splitlines()
+    assert (lines.index("mismatch: global/notes/PREF-REV-005-z.md id=PREF-REV-006")
+            < lines.index("duplicate id: global/notes/PREF-REV-001-a.md and global/notes/PREF-REV-001-b.md")
+            < lines.index("dangling: PREF-REV-004 supersedes PREF-REV-999"))
+
+
+def test_lint_reports_dangling_refers(repo):
+    """M7 / spec section 12: the dangling row must also fire for a
+    precedence note's own `refers` field, not just `supersedes` -- the
+    `_raw_note` in test_lint_rows only ever exercises the `supersedes` arm."""
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    _raw_note(cfg, "PREC-REV-001-x.md", id="PREC-REV-001", title="X", type="precedence",
+               refers=["PREF-REV-999"])
+    out = mind.cmd_lint(cfg, 180)
+    assert "dangling: PREC-REV-001 refers to PREF-REV-999\n" in out
+
+
+def test_lint_reports_no_affirmed_date_for_null_affirmed(repo):
+    """L: lint's stale row must never print "(1000000 days)" for a null
+    `affirmed`; it must always flag it (a null date is always at least as
+    stale as any --days threshold) but say why in words."""
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    _raw_note(cfg, "PREF-REV-001-t.md", affirmed=None)
+    out = mind.cmd_lint(cfg, 180)
+    assert "stale: PREF-REV-001 (no affirmed date)\n" in out
+    assert "1000000" not in out
+
+
+def test_lint_unsuperseded_row_uses_the_old_notes_own_prefix(repo):
+    """L: a project note superseding a GLOBAL note must not mislabel the
+    global note with the project's own prefix in the unsuperseded row."""
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    _raw_note(cfg, "PREF-REV-001-old.md", id="PREF-REV-001", title="Old")
+    mind._ensure_project(cfg, "proj-a")
+    p = mind.project_notes_dir(cfg, "proj-a") / "PREF-REV-002-new.md"
+    p.write_text(mind.render_frontmatter(
+        {"id": "PREF-REV-002", "title": "New", "type": "preference", "stage": "review",
+         "scope": "project:proj-a", "strength": "should", "status": "accepted",
+         "affirmed": "2026-09-01", "supersedes": "PREF-REV-001", "source": "t"}, "body\n"))
+    out = mind.cmd_lint(cfg, 180)
+    assert "unsuperseded: PREF-REV-001 (by proj-a/PREF-REV-002)\n" in out
+    assert "unsuperseded: proj-a/PREF-REV-001" not in out
+
+
+def test_lint_reports_budget_overflow(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "INDEX_BUDGET", 200)
+    for i in range(8):
+        _add(cfg, tmp_path, f"Rule {i}", f"body {i}")
+    out = mind.cmd_lint(cfg, 180)
+    assert "budget: 4 of 8 global rows inject\n" in out
+
+
+def test_lint_does_not_flag_duplicate_titles_across_scopes(repo, tmp_path):
+    """The dedup key is scoped by prefix ('' vs 'acme/'), so identical
+    normalised titles in different scopes never collide."""
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    mind._ensure_project(cfg, "acme")
+    _raw_note(cfg, "PREF-REV-001-t.md", title="Fine")
+    p = mind.project_notes_dir(cfg, "acme") / "PREF-REV-001-t.md"
+    p.write_text(mind.render_frontmatter(
+        {"id": "PREF-REV-001", "title": "Fine", "type": "preference", "stage": "review",
+         "scope": "project:acme", "strength": "should", "status": "accepted",
+         "affirmed": "2026-09-01", "supersedes": None, "source": "t"}, "body\n"))
+    out = mind.cmd_lint(cfg, 180)
+    assert "duplicate:" not in out
+
+
+def test_lint_malformed_rows_are_global_then_project_order(repo, tmp_path):
+    cfg, _, _ = repo; mind.cmd_init(cfg)
+    mind._ensure_project(cfg, "zzz")
+    _raw_note(cfg, "PREF-REV-007-w.md", id="PREF-REV-007", title="W", stage="wish")
+    p = mind.project_notes_dir(cfg, "zzz") / "PREF-REV-008-x.md"
+    p.write_text(mind.render_frontmatter(
+        {"id": "PREF-REV-008", "title": "X", "type": "preference", "stage": "wish",
+         "scope": "project:zzz", "strength": "should", "status": "accepted",
+         "affirmed": "2026-09-01", "supersedes": None, "source": "t"}, "body\n"))
+    out = mind.cmd_lint(cfg, 180)
+    lines = [l for l in out.splitlines() if l.startswith("malformed:")]
+    assert lines == [
+        "malformed: global/notes/PREF-REV-007-w.md: stage must be one of: identity, product, planning, development, testing, review, release, deployment, monitoring, security",
+        "malformed: projects/zzz/notes/PREF-REV-008-x.md: stage must be one of: identity, product, planning, development, testing, review, release, deployment, monitoring, security",
+    ]
+
+
+def test_settings_defaults_and_set(repo):
+    cfg, _, _ = repo
+    assert mind.load_settings(cfg) == ({"auto_answer": True, "escalate": False}, None)
+    assert mind.cmd_settings(cfg, ["escalate=true"]) == "mind: settings auto_answer=true escalate=true"
+    assert json.loads((cfg.home.parent / "settings.json").read_text()) == {"auto_answer": True, "escalate": True}
+    with pytest.raises(mind.ValidationError, match="unknown setting: foo"):
+        mind.cmd_settings(cfg, ["foo=1"])
+    (cfg.home.parent / "settings.json").write_text('{"auto_answer": "false", "escalate": 3}')
+    assert mind.load_settings(cfg) == ({"auto_answer": False, "escalate": False}, None)   # string false is false; junk keeps the default
+
+
+def test_settings_set_rejects_unrecognised_value(repo):
+    """L: `settings --set auto_answer=maybe` must reject the value instead
+    of silently storing false, same as `in (...)` did before."""
+    cfg, _, _ = repo
+    with pytest.raises(mind.ValidationError, match="auto_answer must be true/false/1/0/yes/no/on/off"):
+        mind.cmd_settings(cfg, ["auto_answer=maybe"])
+    assert not (cfg.home.parent / "settings.json").exists()
+
+
+def test_load_settings_corrupt_json_returns_defaults(repo):
+    """SF6: a corrupt settings file must not silently revert to defaults --
+    the error is returned alongside them so callers can report it."""
+    cfg, _, _ = repo
+    (cfg.home.parent / "settings.json").write_text("{not json")
+    assert mind.load_settings(cfg) == (
+        {"auto_answer": True, "escalate": False}, "mind: settings file unreadable, using defaults")
+
+
+def test_doctor_reports_settings_file_unreadable(repo, monkeypatch):
+    """SF6: doctor must say the settings file is corrupt, not silently
+    print the defaults as if they were the owner's configured values."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    (cfg.home.parent / "settings.json").write_text("{not json")
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
+    out = mind.cmd_doctor(cfg)
+    assert "mind: settings file unreadable, using defaults" in out
+
+
+def test_cmd_inject_warns_when_settings_file_is_corrupt(repo, tmp_path):
+    """SF6: inject must not teach the opposite of the owner's configured
+    auto_answer/escalate behaviour every session without saying the
+    settings file itself is unreadable."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    (cfg.home.parent / "settings.json").write_text("{not json")
+    out = mind.cmd_inject(cfg, "clear", tmp_path)
+    assert "mind: settings file unreadable, using defaults\n" in out
+
+
+def test_inject_mode_proposals_and_pending_lines(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_proposals", lambda c: ([("propose/2026-09-12-x", "https://example.test/pr/9")], None))
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.write_text("".join(f'{{"ts": "2026-09-12T10:00:{i:02d}Z", "prompt": "p{i}"}}\n' for i in range(25)))
+    mind.mark_pending(cfg, "2026-09-12T10:00:04Z")
+    out = mind.cmd_inject(cfg, "startup", tmp_path)
+    assert "\nMode: apply notes silently and cite. Conflicts: use precedence notes.\n" in out
+    assert out.endswith("\n1 open proposal: propose/2026-09-12-x https://example.test/pr/9\n"
+                        "\n20 pending prompts since 2026-09-12: run /mind:digest\n")
+    mind.cmd_settings(cfg, ["auto_answer=false", "escalate=true"])
+    out2 = mind.cmd_inject(cfg, "compact", tmp_path)
+    assert "\nMode: confirm before applying a note. Conflicts: always ask.\n" in out2
+    assert "1 open proposal: propose/2026-09-12-x https://example.test/pr/9" in out2   # served from the cache on compact
+
+
+def test_inject_proposals_capped_at_five_with_more_line(repo, tmp_path, monkeypatch):
+    """M4: the proposals block in inject is unbounded outside INDEX_BUDGET;
+    a month of unmerged daily digests would otherwise grow it forever. Cap
+    at 5 total rows (the count line's own proposal counts as one), then a
+    '+N more, run mind.py proposals' line."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    rows = [(f"propose/2026-09-{i:02d}-x", f"https://example.test/pr/{i}") for i in range(1, 8)]
+    monkeypatch.setattr(mind, "_proposals", lambda c: (rows, None))
+    out = mind.cmd_inject(cfg, "startup", tmp_path)
+    assert "7 open proposals: propose/2026-09-01-x https://example.test/pr/1\n" in out
+    for b, u in rows[1:5]:
+        assert f"{b} {u}\n" in out
+    assert "propose/2026-09-06-x" not in out
+    assert "propose/2026-09-07-x" not in out
+    assert "+2 more, run mind.py proposals\n" in out
+
+
+def test_doctor_lines(repo, tmp_path, monkeypatch):
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _git(["config", "user.email", "doctor@example.test"], cfg.home)
+    cfg = dataclasses.replace(cfg, repo="https://x-access-token:sekrit@example.test/o/r.git", token="sekrit")
+    monkeypatch.setattr(mind, "_gh", lambda c, a, w, timeout=20: subprocess.CompletedProcess(a, 0, "gh version 2.0.0\n", "Logged in"))
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
+    out = mind.cmd_doctor(cfg).splitlines()
+    assert out[0] == f"config: MIND_REPO=https://***@example.test/o/r.git MIND_HOME={cfg.home} MIND_TOKEN=set MIND_PROJECT=unset"
+    assert out[1] == "checkout: ok"
+    assert out[2] == "upstream: main tracks origin/main"
+    assert out[3] == "remote: reachable (12 ms)"
+    assert out[4] == "identity: doctor@example.test"
+    assert out[5] == "gh: 2.0.0 authenticated"
+    assert out[6] == "pending: 0 lines, 0 unprocessed, watermark none"
+    assert out[7] == "capture: never"
+    assert out[8] == "settings: auto_answer=true escalate=false"
+    assert out[9] == "notes: 0 accepted, 0 drafts, 0 malformed, 0 projects"
+    assert "sekrit" not in "\n".join(out)
+
+
+def test_doctor_reports_capture_last_write_from_newest_pending_row(repo, monkeypatch):
+    """SF9: capture is double-silenced (capture.sh redirects to /dev/null,
+    cmd_capture swallows every exception) with no health signal anywhere;
+    doctor must report the newest captured ts and the line count, so an
+    unwritable MIND_PENDING or a full disk doesn't mine nothing forever
+    while `pending: 0 lines` reads as normal."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.write_text('{"ts": "2026-09-12T09:00:00Z", "prompt": "one"}\n'
+                        '{"ts": "2026-09-12T11:00:00Z", "prompt": "two"}\n')
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
+    out = mind.cmd_doctor(cfg).splitlines()
+    assert out[7] == "capture: last write 2026-09-12T11:00:00Z (2 lines)"
+
+
+def test_doctor_upstream_checks_main_specifically_not_current_head(repo, monkeypatch):
+    """L: `upstream:` must reflect main's own tracking branch, not whatever
+    branch happens to be checked out in cfg.home at the time."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    _git(["checkout", "-q", "-b", "scratch"], cfg.home)   # HEAD now on a branch with no upstream
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
+    out = mind.cmd_doctor(cfg).splitlines()
+    assert out[2] == "upstream: main tracks origin/main"
+
+
+def test_remote_reachable_reports_missing_checkout_directory(tmp_path):
+    """L: when cfg.home.parent does not exist at all, `_remote_reachable`
+    must say so specifically, not the generic "unreachable" it shares with
+    a real network failure."""
+    env = {"MIND_REPO": str(tmp_path / "missing.git"), "MIND_HOME": str(tmp_path / "nowhere" / "home")}
+    cfg = mind.Config.from_env(env, tmp_path)
+    assert mind._remote_reachable(cfg) == (False, "no checkout directory")
+
+
+def test_doctor_missing_checkout_never_clones(tmp_path, monkeypatch):
+    """doctor must never call ensure_checkout (which would clone or mutate):
+    it reports `checkout: missing` for a home that was never cloned, purely
+    read-only."""
+    env = {"MIND_REPO": str(tmp_path / "missing.git"), "MIND_HOME": str(tmp_path / "home")}
+    cfg = mind.Config.from_env(env, tmp_path)
+    real_git = mind.git
+
+    def spy(cfg, args, cwd, timeout):
+        assert "clone" not in args
+        return real_git(cfg, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", spy)
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    out = mind.cmd_doctor(cfg).splitlines()
+    assert not cfg.home.exists()
+    assert out[1] == "checkout: missing"
+    assert out[9] == "notes: 0 accepted, 0 drafts, 0 malformed, 0 projects"
+
+
+def test_doctor_reports_broken_not_a_git_dir(tmp_path, monkeypatch):
+    """M7 / Plan Task 7 pinned test: a `.git` present but structurally empty
+    (a clone the timeout killed mid-transfer) must read as broken, distinct
+    from `missing`."""
+    home = tmp_path / "h"
+    (home / ".git").mkdir(parents=True)
+    cfg = mind.Config.from_env({"MIND_REPO": "/irrelevant", "MIND_HOME": str(home)}, tmp_path)
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    out = mind.cmd_doctor(cfg).splitlines()
+    assert out[1] == "checkout: broken (not a git dir)"
+
+
+def test_doctor_reports_broken_no_head_for_uncommitted_init(tmp_path, monkeypatch):
+    """M7: a structurally valid but never-committed-to repo (`git init` with
+    zero commits, an unborn HEAD) is the sibling broken state to `not a git
+    dir` -- `_is_valid_git_dir` passes, `_has_head` does not."""
+    home = tmp_path / "h"
+    _git(["init", "-q", "--initial-branch=main", str(home)], tmp_path)
+    cfg = mind.Config.from_env({"MIND_REPO": "/irrelevant", "MIND_HOME": str(home)}, tmp_path)
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    out = mind.cmd_doctor(cfg).splitlines()
+    assert out[1] == "checkout: broken (no HEAD)"
+
+
+def test_doctor_without_mind_repo_reports_unset_and_continues(tmp_path, monkeypatch, capsys):
+    """L: doctor is a diagnostic command for a broken setup, and MIND_REPO
+    unset is exactly the kind of thing a second machine needs it to explain
+    -- it must not exit 1 with a stderr message and print nothing else."""
+    env = {"MIND_HOME": str(tmp_path / "home")}
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    rc = mind.main(["doctor"], env=env, cwd=tmp_path)
+    out = capsys.readouterr().out.splitlines()
+    assert rc == 0
+    assert out[0].startswith("config: MIND_REPO=unset MIND_HOME=")
+    assert out[1] == "checkout: missing"
+    assert out[3] == "remote: unreachable (MIND_REPO not set)"
+    assert out[9] == "notes: 0 accepted, 0 drafts, 0 malformed, 0 projects"
