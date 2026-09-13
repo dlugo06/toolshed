@@ -308,6 +308,10 @@ def test_brief_has_no_mind_section(root, monkeypatch, capsys):
     assert main(["--brief"]) == 0
     out = capsys.readouterr().out
     assert "Mind:" not in out and "mind.py" not in out
+    # Pin the brief's actual content too, so this test fails if the brief
+    # prints nothing rather than passing vacuously on an absence check alone.
+    assert "# Orchestrator: work on the hook" in out
+    assert "alpha: 5 open, 2 in flight" in out
 
 
 class _SyncRun:
