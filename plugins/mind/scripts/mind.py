@@ -1392,8 +1392,10 @@ def cmd_doctor(cfg: Config) -> str:
     wm_path = _watermark_file(cfg)
     watermark = wm_path.read_text(encoding="utf-8").strip() if wm_path.exists() else "none"
     lines.append(f"pending: {total} lines, {unprocessed} unprocessed, watermark {watermark}")
-    settings = load_settings(cfg)
+    settings, settings_error = load_settings(cfg)
     lines.append(f"settings: auto_answer={str(settings['auto_answer']).lower()} escalate={str(settings['escalate']).lower()}")
+    if settings_error:
+        lines.append(settings_error)
     accepted = draft = 0
     for d in [global_notes_dir(cfg)] + [project_notes_dir(cfg, s) for s in list_projects(cfg)]:
         for n in load_notes(d):
@@ -1482,9 +1484,15 @@ def SETTINGS_FILE(cfg: Config) -> Path:
     return Path(cfg.env["MIND_SETTINGS"]) if cfg.env.get("MIND_SETTINGS") else cfg.home.parent / "settings.json"
 
 
-def load_settings(cfg: Config) -> dict:
+def load_settings(cfg: Config) -> tuple[dict, str | None]:
+    """Returns (settings, error). A corrupt settings file (bad JSON, or a
+    JSON value that isn't a mapping) silently reverting to defaults would
+    flip auto_answer back to true and teach the opposite of the owner's
+    configured behaviour every session; error is set so callers can report
+    it instead of presenting the defaults as fact."""
     out = dict(DEFAULT_SETTINGS)
     p = SETTINGS_FILE(cfg)
+    error = None
     if p.exists():
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
@@ -1497,8 +1505,8 @@ def load_settings(cfg: Config) -> dict:
                     out[k] = v.strip().lower() in ("1", "true", "yes", "on")
                 # any other JSON type keeps the default
         except (json.JSONDecodeError, AttributeError):
-            pass
-    return out
+            error = "mind: settings file unreadable, using defaults"
+    return out, error
 
 
 _SETTINGS_TRUE = {"true", "1", "yes", "on"}
@@ -1506,7 +1514,7 @@ _SETTINGS_FALSE = {"false", "0", "no", "off"}
 
 
 def cmd_settings(cfg: Config, sets: list[str]) -> str:
-    current = load_settings(cfg)
+    current, _ = load_settings(cfg)
     for item in sets:
         key, _, val = item.partition("=")
         if key not in DEFAULT_SETTINGS:
@@ -1525,7 +1533,7 @@ def cmd_settings(cfg: Config, sets: list[str]) -> str:
 
 
 def _mode_line(cfg: Config) -> str:
-    s = load_settings(cfg)
+    s, _ = load_settings(cfg)
     mode = "apply notes silently and cite" if s["auto_answer"] else "confirm before applying a note"
     conflicts = "always ask" if s["escalate"] else "use precedence notes"
     return f"Mode: {mode}. Conflicts: {conflicts}.\n"
@@ -1618,6 +1626,9 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
             except OSError as exc:
                 out.append(f"mind: reindex failed, {exc}\n")
     out.append(PROTOCOL.format(home=cfg.home))
+    _, settings_error = load_settings(cfg)
+    if settings_error:
+        out.append(settings_error + "\n")
     out.append("\n" + _mode_line(cfg))
     candidate = resolve_candidate(cfg, cwd)
     slug = match_project(cfg, candidate)

@@ -2741,13 +2741,13 @@ def test_lint_malformed_rows_are_global_then_project_order(repo, tmp_path):
 
 def test_settings_defaults_and_set(repo):
     cfg, _, _ = repo
-    assert mind.load_settings(cfg) == {"auto_answer": True, "escalate": False}
+    assert mind.load_settings(cfg) == ({"auto_answer": True, "escalate": False}, None)
     assert mind.cmd_settings(cfg, ["escalate=true"]) == "mind: settings auto_answer=true escalate=true"
     assert json.loads((cfg.home.parent / "settings.json").read_text()) == {"auto_answer": True, "escalate": True}
     with pytest.raises(mind.ValidationError, match="unknown setting: foo"):
         mind.cmd_settings(cfg, ["foo=1"])
     (cfg.home.parent / "settings.json").write_text('{"auto_answer": "false", "escalate": 3}')
-    assert mind.load_settings(cfg) == {"auto_answer": False, "escalate": False}   # string false is false; junk keeps the default
+    assert mind.load_settings(cfg) == ({"auto_answer": False, "escalate": False}, None)   # string false is false; junk keeps the default
 
 
 def test_settings_set_rejects_unrecognised_value(repo):
@@ -2760,9 +2760,35 @@ def test_settings_set_rejects_unrecognised_value(repo):
 
 
 def test_load_settings_corrupt_json_returns_defaults(repo):
+    """SF6: a corrupt settings file must not silently revert to defaults --
+    the error is returned alongside them so callers can report it."""
     cfg, _, _ = repo
     (cfg.home.parent / "settings.json").write_text("{not json")
-    assert mind.load_settings(cfg) == {"auto_answer": True, "escalate": False}
+    assert mind.load_settings(cfg) == (
+        {"auto_answer": True, "escalate": False}, "mind: settings file unreadable, using defaults")
+
+
+def test_doctor_reports_settings_file_unreadable(repo, monkeypatch):
+    """SF6: doctor must say the settings file is corrupt, not silently
+    print the defaults as if they were the owner's configured values."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    (cfg.home.parent / "settings.json").write_text("{not json")
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
+    out = mind.cmd_doctor(cfg)
+    assert "mind: settings file unreadable, using defaults" in out
+
+
+def test_cmd_inject_warns_when_settings_file_is_corrupt(repo, tmp_path):
+    """SF6: inject must not teach the opposite of the owner's configured
+    auto_answer/escalate behaviour every session without saying the
+    settings file itself is unreadable."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    (cfg.home.parent / "settings.json").write_text("{not json")
+    out = mind.cmd_inject(cfg, "clear", tmp_path)
+    assert "mind: settings file unreadable, using defaults\n" in out
 
 
 def test_inject_mode_proposals_and_pending_lines(repo, tmp_path, monkeypatch):
