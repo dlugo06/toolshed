@@ -1112,13 +1112,33 @@ def mark_pending(cfg: Config, ts: str) -> None:
     _watermark_file(cfg).write_text(ts + "\n", encoding="utf-8")
 
 
-def clear_pending(cfg: Config) -> None:
-    """Truncate the captured-prompt file (which can carry pasted secrets)
-    while keeping the watermark, so a digest run can purge it after marking
-    without losing where the next run should resume from."""
+def clear_pending(cfg: Config) -> bool:
+    """Delete every captured-prompt row (which can carry pasted secrets)
+    whose ts is at or before the watermark (<pending file>.processed),
+    keeping the watermark itself and any row a concurrent session appended
+    after it -- the digest skill's own `pending` -> `propose` -> `--mark
+    <last ts>` -> `--clear` sequence must never delete a prompt nobody has
+    mined yet. Returns False (deleting nothing) when there is no watermark
+    at all, rather than truncating every unprocessed prompt."""
+    wm_path = _watermark_file(cfg)
+    if not wm_path.exists():
+        return False
+    watermark = wm_path.read_text(encoding="utf-8").strip()
     path = PENDING_FILE(cfg)
-    if path.exists():
-        path.write_text("", encoding="utf-8")
+    if not path.exists():
+        return True
+    kept = []
+    for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            # Never silently drop a line this run cannot even parse.
+            kept.append(line)
+            continue
+        if row.get("ts", "") > watermark:
+            kept.append(line)
+    path.write_text("".join(kept), encoding="utf-8")
+    return True
 
 
 def _scoped_notes(cfg: Config, all_projects: bool, project: str | None, cwd: Path) -> list[tuple[str, Note]]:
@@ -1795,12 +1815,21 @@ def main(argv: list[str], env=os.environ, cwd: Path | None = None) -> int:
             rows = cmd_proposals(cfg)
             msg = "\n".join(f"{b} {u}" for b, u in rows) if rows else "mind: no open proposals"
         elif args.cmd == "pending":
-            if args.mark:
-                mark_pending(cfg, args.mark)
-                msg = f"mind: pending marked at {args.mark}"
-            elif args.clear:
-                clear_pending(cfg)
-                msg = "mind: pending cleared"
+            if args.mark or args.clear:
+                # Both flags run, in order: a bare --clear with no watermark
+                # at all does nothing rather than truncating unprocessed
+                # prompts (see clear_pending).
+                parts = []
+                if args.mark:
+                    mark_pending(cfg, args.mark)
+                    parts.append(f"pending marked at {args.mark}")
+                if args.clear:
+                    cleared = clear_pending(cfg)
+                    if cleared or args.mark:
+                        parts.append("pending cleared")
+                    else:
+                        parts = ["nothing marked, nothing cleared"]
+                msg = "mind: " + ", ".join(parts)
             else:
                 rows = read_pending(cfg, args.since, args.limit)
                 for row in rows:

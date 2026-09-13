@@ -2384,14 +2384,54 @@ def test_clear_pending_truncates_file_and_keeps_watermark(repo):
     assert (cfg.home.parent / "pending.jsonl.processed").read_text() == "2026-09-12T10:00:00Z\n"
 
 
-def test_main_pending_clear_reports_and_truncates(repo, capsys):
+def test_clear_pending_deletes_only_rows_at_or_before_watermark(repo):
+    """SF3/PR-3: `pending --clear` must drop only rows up to the watermark,
+    never rows a concurrent session appended after the last --mark (the
+    digest skill's own pending -> propose -> --mark -> --clear sequence)."""
+    cfg, _, _ = repo
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.write_text('{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n'
+                        '{"ts": "2026-09-12T11:00:00Z", "prompt": "two"}\n')
+    mind.mark_pending(cfg, "2026-09-12T10:00:00Z")
+    with pending.open("a", encoding="utf-8") as fh:
+        fh.write('{"ts": "2026-09-12T12:00:00Z", "prompt": "three"}\n')
+    assert mind.clear_pending(cfg) is True
+    rows = [json.loads(line) for line in pending.read_text().splitlines()]
+    assert [r["prompt"] for r in rows] == ["two", "three"]
+
+
+def test_clear_pending_with_no_watermark_deletes_nothing(repo):
+    """SF3/PR-3: a bare --clear with no watermark at all must not destroy
+    unprocessed prompts nobody has mined yet."""
+    cfg, _, _ = repo
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.write_text('{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n')
+    assert mind.clear_pending(cfg) is False
+    assert pending.read_text() == '{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n'
+
+
+def test_main_pending_clear_with_no_watermark_reports_nothing(repo, capsys):
     cfg, _, _ = repo
     pending = cfg.home.parent / "pending.jsonl"
     pending.parent.mkdir(parents=True, exist_ok=True)
     pending.write_text('{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n')
     rc = mind.main(["pending", "--clear"], env={"MIND_REPO": cfg.repo, "MIND_HOME": str(cfg.home)}, cwd=cfg.home)
     assert rc == 0
-    assert capsys.readouterr().out == "mind: pending cleared\n"
+    assert capsys.readouterr().out == "mind: nothing marked, nothing cleared\n"
+    assert pending.read_text() == '{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n'
+
+
+def test_main_pending_mark_and_clear_together_runs_both(repo, capsys):
+    """SF3/PR-3: `pending --mark X --clear` previously took only the mark
+    branch and silently ignored --clear."""
+    cfg, _, _ = repo
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    pending.write_text('{"ts": "2026-09-12T10:00:00Z", "prompt": "one"}\n')
+    rc = mind.main(["pending", "--mark", "2026-09-12T10:00:00Z", "--clear"],
+                   env={"MIND_REPO": cfg.repo, "MIND_HOME": str(cfg.home)}, cwd=cfg.home)
+    assert rc == 0
+    assert capsys.readouterr().out == "mind: pending marked at 2026-09-12T10:00:00Z, pending cleared\n"
     assert pending.read_text() == ""
 
 
