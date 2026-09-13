@@ -2578,6 +2578,17 @@ def test_capture_caps_file_at_two_megabytes(repo, tmp_path):
     assert json.loads(lines[-1])["prompt"] == "the newest prompt of them all"
 
 
+def test_capture_creates_pending_file_with_0600_permissions(repo, tmp_path):
+    """SEC-M1: pending.jsonl was created with the default umask (typically
+    0o644, world-readable) and never chmod'd anywhere -- every prompt the
+    owner ever types lands there in clear text."""
+    cfg, _, _ = repo
+    env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    _capture(env, {"session_id": "s1", "prompt": "never use em dashes in output", "cwd": str(tmp_path)}, tmp_path)
+    pending = cfg.home.parent / "pending.jsonl"
+    assert (pending.stat().st_mode & 0o777) == 0o600
+
+
 def test_read_and_mark_pending(repo):
     cfg, _, _ = repo
     pending = cfg.home.parent / "pending.jsonl"

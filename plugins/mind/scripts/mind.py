@@ -1133,6 +1133,20 @@ def _utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _append_0600(path: Path, text: str) -> None:
+    """Append to `path`, creating it with mode 0o600 (never the default
+    umask, typically 0o644/world-readable) instead of relying on a chmod
+    that might never come; also chmod on every append in case the file
+    predates this fix or something else loosened its mode. Every prompt
+    the owner ever types lands here in clear text (SEC-M1)."""
+    fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+
+
 def cmd_capture(cfg: Config, payload: dict, cwd: Path) -> None:
     prompt = str(payload.get("prompt") or "").strip()
     if len(prompt) < 12 or prompt.startswith("/"):
@@ -1145,12 +1159,12 @@ def cmd_capture(cfg: Config, payload: dict, cwd: Path) -> None:
         # best-effort capture log; not worth a lock file for this.
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         path.write_text("".join(lines[len(lines) // 2:]), encoding="utf-8")
+        os.chmod(path, 0o600)
     cwd_str = str(payload.get("cwd") or cwd)
     row = {"ts": _utc_now(), "session": str(payload.get("session_id") or ""),
            "project": resolve_candidate(cfg, Path(cwd_str)), "cwd": cwd_str,
            "prompt": _mask_credential_shapes(prompt)}
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    _append_0600(path, json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def _watermark_file(cfg: Config) -> Path:
