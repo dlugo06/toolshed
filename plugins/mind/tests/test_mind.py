@@ -3132,6 +3132,9 @@ def test_doctor_reports_remote_mismatch_when_origin_differs_from_mind_repo(repo,
     repo the checkout doesn't actually use."""
     cfg, bare, _ = repo
     mind.cmd_init(cfg)
+    # A credentialed origin (a natural leftover from a prior MIND_TOKEN
+    # session) must never reach stdout unredacted on this line either.
+    _git(["remote", "set-url", "origin", f"https://x-access-token:sekrit@example.test{bare}"], cfg.home)
     monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
 
     def unexpected(c):
@@ -3140,8 +3143,10 @@ def test_doctor_reports_remote_mismatch_when_origin_differs_from_mind_repo(repo,
     monkeypatch.setattr(mind, "_remote_reachable", unexpected)
     mismatched_repo = str(bare) + "-other"
     cfg2 = dataclasses.replace(cfg, repo=mismatched_repo)
-    out = mind.cmd_doctor(cfg2).splitlines()
-    assert out[3] == f"remote: origin {bare} does not match MIND_REPO"
+    out = mind.cmd_doctor(cfg2)
+    lines = out.splitlines()
+    assert lines[3] == f"remote: origin https://***@example.test{bare} does not match MIND_REPO"
+    assert "sekrit" not in out
 
 
 def test_doctor_remote_line_ignores_trailing_dotgit_and_userinfo_when_comparing(repo, monkeypatch):

@@ -1505,7 +1505,7 @@ def cmd_doctor(cfg: Config) -> str:
             # elsewhere (a copy-pasted config, a rotated data repo URL):
             # reachability against MIND_REPO would be beside the point --
             # this checkout doesn't pull from or push to it at all.
-            lines.append(f"remote: origin {origin} does not match MIND_REPO")
+            lines.append(f"remote: origin {_redact(origin, cfg)} does not match MIND_REPO")
         else:
             reachable, info = _remote_reachable(cfg)
             lines.append(f"remote: reachable ({info} ms)" if reachable else f"remote: unreachable ({_redact(str(info), cfg)})")
