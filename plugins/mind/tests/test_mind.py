@@ -346,6 +346,34 @@ def test_rebase_failure_message_shares_pull_classification(repo):
     assert msg == "mind: sync blocked: fatal: Not possible to fast-forward, aborting."
 
 
+def test_pull_failure_message_classifies_auth_failure_not_offline(repo):
+    """SF4: a revoked token or wrong deploy key must not be classified as
+    offline -- the owner would wait for connectivity that is not the
+    problem. Permission denied/Authentication/publickey stderr is a sync
+    block naming the authentication failure specifically."""
+    cfg, _, _ = repo
+    proc = subprocess.CompletedProcess(
+        args=["git", "pull"], returncode=128, stdout="",
+        stderr="git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.\n",
+    )
+    msg = mind._pull_failure_message(cfg, proc)
+    assert msg == "mind: sync blocked: authentication failed (fatal: Could not read from remote repository.)"
+    assert "offline" not in msg
+
+
+def test_pull_failure_message_classifies_could_not_read_username_as_auth(repo):
+    """SF4: an https remote with no credential helper answering fails with
+    'could not read Username', also authentication, not offline."""
+    cfg, _, _ = repo
+    proc = subprocess.CompletedProcess(
+        args=["git", "pull"], returncode=128, stdout="",
+        stderr="fatal: could not read Username for 'https://example.test': terminal prompts disabled\n",
+    )
+    msg = mind._pull_failure_message(cfg, proc)
+    assert msg.startswith("mind: sync blocked: authentication failed (")
+    assert "offline" not in msg
+
+
 def test_cmd_init_against_empty_bare_repo_pushes_and_sets_upstream(tmp_path):
     """The documented first-run path: an empty data repo has no upstream
     branch yet. init must still push, not report offline forever."""

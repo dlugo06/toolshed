@@ -253,9 +253,10 @@ def _head_date(cfg: Config) -> str:
     return out.stdout.strip() or "unknown"
 
 
-_OFFLINE_RE = re.compile(
-    r"Could not resolve|Connection|timed out|Permission denied|Authentication|publickey",
-    re.IGNORECASE,
+_OFFLINE_RE = re.compile(r"Could not resolve|Connection|timed out", re.IGNORECASE)
+
+_AUTH_FAILURE_RE = re.compile(
+    r"Permission denied|Authentication|publickey|could not read Username", re.IGNORECASE,
 )
 
 
@@ -263,15 +264,19 @@ def _pull_failure_message(cfg: Config, proc: subprocess.CompletedProcess | None)
     """Classify why a pull (or pull --rebase) failed. `proc` is None on a
     timeout. Order: no upstream at all (a brand-new empty data repo, nothing
     to pull yet) beats every other reading; a timeout or stderr naming a
-    network/auth problem is offline; anything else (diverged, dirty tree,
-    corrupt repo) is a sync block the owner must act on, not a transient
-    offline blip."""
+    network problem is offline; stderr naming an authentication problem (a
+    revoked token, a wrong deploy key) is a sync block that says so
+    specifically -- the owner would otherwise wait for connectivity that is
+    not the problem; anything else (diverged, dirty tree, corrupt repo) is
+    a sync block the owner must act on, not a transient offline blip."""
     if not _has_upstream(cfg):
         return "mind: first run, nothing to pull yet"
     if proc is None or _OFFLINE_RE.search(proc.stderr or ""):
         return f"mind: offline, using cached copy from {_head_date(cfg)}"
     lines = (proc.stderr or "").strip().splitlines()
     last = lines[-1] if lines else "unknown error"
+    if _AUTH_FAILURE_RE.search(proc.stderr or ""):
+        return f"mind: sync blocked: authentication failed ({last})"
     return f"mind: sync blocked: {last}"
 
 
