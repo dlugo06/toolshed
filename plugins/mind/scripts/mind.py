@@ -1766,7 +1766,18 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
     if _schema_predates_0_2_0(cfg):
         out.append("mind: schema.md predates 0.2.0, re-copy templates/schema.md\n")
     cache = _proposals_cache(cfg)
-    if event in ("startup", "resume"):
+    # PR-4: a fetch plus `gh pr list` on top of the existing pull, on every
+    # startup/resume, is a worst case near 40s inside a SessionStart hook.
+    # `resume` (a plain conversation resume, not a fresh session) serves a
+    # cache written less than an hour ago as-is; only `startup` always
+    # refreshes.
+    cache_is_fresh = False
+    if cache.exists():
+        try:
+            cache_is_fresh = (time.time() - cache.stat().st_mtime) < 3600
+        except OSError:
+            cache_is_fresh = False
+    if event == "startup" or (event == "resume" and not cache_is_fresh):
         try:
             fresh_rows, warning = _proposals(cfg)
         except Exception:

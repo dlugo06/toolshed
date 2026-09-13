@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1528,6 +1529,37 @@ def test_cmd_inject_offline_line(repo, tmp_path, monkeypatch):
     assert out.startswith("mind: offline, using cached copy from 2026-09-12\n")
 
 
+def test_cmd_inject_resume_with_fresh_cache_skips_proposals_refresh(repo, tmp_path, monkeypatch):
+    """PR-4: resume previously called _proposals (a fetch plus `gh pr
+    list`) on every SessionStart, on top of the existing pull -- worst
+    case ~40s inside a SessionStart hook. A cache written less than an
+    hour ago must be served as-is, with no _proposals call at all."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    cache = mind._proposals_cache(cfg)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps([["propose/2026-09-12-x", "https://example.test/pr/9"]]), encoding="utf-8")
+    monkeypatch.setattr(mind, "_proposals", lambda c: pytest.fail("_proposals called on resume with a fresh cache"))
+    out = mind.cmd_inject(cfg, "resume", tmp_path)
+    assert "1 open proposal: propose/2026-09-12-x https://example.test/pr/9" in out
+
+
+def test_cmd_inject_resume_with_stale_cache_refreshes(repo, tmp_path, monkeypatch):
+    """PR-4: a cache older than an hour must still be refreshed on
+    resume, not served forever."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    cache = mind._proposals_cache(cfg)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps([["propose/stale-x", "https://example.test/pr/1"]]), encoding="utf-8")
+    old = time.time() - 3601
+    os.utime(cache, (old, old))
+    monkeypatch.setattr(mind, "_proposals",
+                        lambda c: ([("propose/2026-09-12-fresh", "https://example.test/pr/9")], None))
+    out = mind.cmd_inject(cfg, "resume", tmp_path)
+    assert "1 open proposal: propose/2026-09-12-fresh https://example.test/pr/9" in out
+
+
 def test_cmd_inject_survives_proposals_fetch_timeout(repo, tmp_path, monkeypatch):
     """A hung fetch inside cmd_proposals must not discard the whole session-
     start payload: it degrades to no proposals line (and an empty cache),
@@ -1931,6 +1963,20 @@ def test_cmd_proposals_lists_open_branches(repo, monkeypatch):
     _git(["add", "."], seed); _git(["commit", "-q", "-m", "z"], seed); _git(["push", "-q", "-u", "origin", "propose/2026-09-12-x"], seed)
     monkeypatch.setattr(mind, "_gh", FakeGh(existing=[{"headRefName": "propose/2026-09-12-x", "url": "https://example.test/pr/9"}]))
     assert mind.cmd_proposals(cfg) == [("propose/2026-09-12-x", "https://example.test/pr/9")]
+
+
+def test_cmd_proposals_gh_pr_list_uses_limit_100(repo, monkeypatch):
+    """PR-6: `gh pr list --state open` has no --limit, and gh defaults to
+    30 -- past 30 open PRs on the data repo, proposal rows print with an
+    empty URL rather than saying the lookup was truncated."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    fake = FakeGh()
+    monkeypatch.setattr(mind, "_gh", fake)
+    mind.cmd_proposals(cfg)
+    listing_calls = [c for c in fake.calls if c[:2] == ["pr", "list"]]
+    assert listing_calls
+    assert "--limit" in listing_calls[0] and listing_calls[0][listing_calls[0].index("--limit") + 1] == "100"
 
 
 def test_cmd_proposals_lists_unpushed_local_branch(repo):
