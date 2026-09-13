@@ -1478,6 +1478,45 @@ def test_cmd_inject_survives_proposals_fetch_timeout(repo, tmp_path, monkeypatch
     assert json.loads(cache.read_text()) == []
 
 
+def test_cmd_inject_proposals_listing_failure_does_not_poison_cache(repo, tmp_path, monkeypatch):
+    """SF2: a proposals-listing failure that raises (not the already-handled
+    fetch timeout) must never overwrite a good cache with an empty list --
+    a later clear/compact would otherwise report zero proposals forever."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    cache = mind._proposals_cache(cfg)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps([["propose/2026-09-12-x", "https://example.test/pr/9"]]), encoding="utf-8")
+
+    def boom(c):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mind, "_proposals", boom)
+    out = mind.cmd_inject(cfg, "startup", tmp_path)
+    assert "open proposal" not in out   # this session shows nothing rather than a wrong count
+    assert json.loads(cache.read_text()) == [["propose/2026-09-12-x", "https://example.test/pr/9"]]
+    out2 = mind.cmd_inject(cfg, "compact", tmp_path)
+    assert "1 open proposal: propose/2026-09-12-x https://example.test/pr/9" in out2
+
+
+def test_cmd_inject_reindex_failure_does_not_lose_payload(repo, tmp_path, monkeypatch):
+    """SF2: reindex (after sync, and the projects-index fallback) sat
+    outside any try/except; an OSError there (disk full, permissions)
+    reached main's own except Exception and replaced the whole payload
+    with "mind: inject failed, OSError: ...". It must instead print one
+    line and keep everything built so far."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+
+    def boom(c):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(mind, "reindex", boom)
+    out = mind.cmd_inject(cfg, "startup", tmp_path)
+    assert "mind: reindex failed, disk full\n" in out
+    assert mind.PROTOCOL.format(home=cfg.home) in out
+
+
 def test_cmd_inject_truncates_global_first(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)

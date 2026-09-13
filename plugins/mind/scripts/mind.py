@@ -1578,8 +1578,13 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
         else:
             # Indexes are gitignored, so a fresh clone (or one another
             # machine just pushed notes into) has no up-to-date index.md
-            # on disk until it is regenerated locally.
-            reindex(cfg)
+            # on disk until it is regenerated locally. An OSError here
+            # (disk full, permissions) must not reach main's own bare
+            # except Exception and replace the whole payload built so far.
+            try:
+                reindex(cfg)
+            except OSError as exc:
+                out.append(f"mind: reindex failed, {exc}\n")
     out.append(PROTOCOL.format(home=cfg.home))
     out.append("\n" + _mode_line(cfg))
     candidate = resolve_candidate(cfg, cwd)
@@ -1594,7 +1599,10 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
         # missing. Reading it missing as "# Projects\n" would silently tell
         # the owner they have zero projects, a wrong answer rather than an
         # error.
-        reindex(cfg)
+        try:
+            reindex(cfg)
+        except OSError as exc:
+            out.append(f"mind: reindex failed, {exc}\n")
     projects_idx = projects_index_path.read_text(encoding="utf-8") if projects_index_path.is_file() else "# Projects\n"
     global_idx, project_idx = _fit(global_notes, "Global", project_notes, project_heading, projects_idx)
     out += ["\n" + global_idx, "\n" + project_idx, "\n" + projects_idx]
@@ -1610,16 +1618,24 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
     cache = _proposals_cache(cfg)
     if event in ("startup", "resume"):
         try:
-            rows, warning = _proposals(cfg)
+            fresh_rows, warning = _proposals(cfg)
         except Exception:
             # inject must never lose the payload already built above over a
             # proposals-listing failure (a hung git or gh call): degrade to
-            # no proposals line, same as having none.
-            rows, warning = [], None
+            # no proposals line this session -- but never poison a good
+            # cache with an empty list, or every later clear/compact would
+            # report zero proposals too. None (not []) marks "skip the
+            # write"; a real empty listing is still cached below.
+            fresh_rows, warning = None, None
+        rows = fresh_rows if fresh_rows is not None else []
         if warning:
             out.append(warning + "\n")
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps(rows), encoding="utf-8")
+        if fresh_rows is not None:
+            try:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_text(json.dumps(fresh_rows), encoding="utf-8")
+            except OSError as exc:
+                out.append(f"mind: proposals cache write failed, {exc}\n")
     else:
         rows = []
         if cache.exists():
