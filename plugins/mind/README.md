@@ -13,7 +13,11 @@ export MIND_REPO=git@github.com:<owner>/<data-repo>.git
 
 `MIND_REPO` must be one of the documented forms: `ssh://...`, `git@host:...`, `https://...`, `file://...`, or an absolute path. Anything else (e.g. a `ext::` transport) is rejected before any git call is made.
 
-Optional environment variables: `MIND_HOME` (checkout path; defaults to `${CLAUDE_PLUGIN_DATA}/repo`, falling back to `~/.mind/repo`), `MIND_TOKEN` (a token for https remotes, used for cloud sessions where SSH isn't available), `MIND_PROJECT` (force the project slug for this session), `MIND_PENDING` (captured-prompt file path; defaults to `<MIND_HOME>/../pending.jsonl`), `MIND_SETTINGS` (per-machine settings file path; defaults to `<MIND_HOME>/../settings.json`).
+Optional environment variables: `MIND_HOME` (checkout path; defaults to `${CLAUDE_PLUGIN_DATA}/repo`, falling back to `~/.mind/repo`; in a cloud session, point it at the attached data repo's clone), `MIND_TOKEN` (a token for https remotes; last resort only, read-only scope — see §Cloud sessions), `MIND_PROJECT` (force the project slug for this session), `MIND_PENDING` (captured-prompt file path; defaults to `<MIND_HOME>/../pending.jsonl`; in a cloud session, point it outside any checkout), `MIND_SETTINGS` (per-machine settings file path; defaults to `<MIND_HOME>/../settings.json`).
+
+## Cloud sessions
+
+The verified path is to attach the data repo to the cloud session so the environment's own GitHub proxy authenticates it — never set `MIND_TOKEN` for this. Point `MIND_HOME` at the attached clone's working directory, and point `MIND_PENDING` at a path outside any checkout (a git checkout the environment can reset or discard between sessions must never be the only copy of unmined captured prompts). Repo-declared plugins, `mind` included, are installed by the environment's own setup script in cloud sessions, not by hand. `MIND_TOKEN` stays documented for the case attaching the repo isn't possible: use a read-only-scoped token only, never one with write access, since it travels through session environment variables that this plugin does not control end-to-end.
 
 First run, once the data repo is empty and `MIND_REPO` is set:
 
@@ -126,7 +130,7 @@ One script, `scripts/mind.py`, stdlib only:
 
 ## Sync and failure behaviour
 
-- Authentication: SSH on the owner's machines. In cloud sessions `MIND_REPO` is an https URL and `MIND_TOKEN` is set; the token is passed to git through a credential helper on the command line (username `x-access-token`), never written to disk. An empty `credential.helper=` is emitted first to reset any helper configured earlier (global osxkeychain, `gh`, etc.), so only ours answers and none of them persists the token.
+- Authentication: SSH on the owner's machines. In cloud sessions, attach the data repo to the session so the environment's GitHub proxy authenticates it — set `MIND_HOME` to the attached clone and never put a token in the environment (see §Cloud sessions). `MIND_TOKEN` is a last resort, read-only scope, for when attaching isn't possible: it is passed to git through a credential helper on the command line (username `x-access-token`), never written to disk. An empty `credential.helper=` is emitted first to reset any helper configured earlier (global osxkeychain, `gh`, etc.), so only ours answers and none of them persists the token.
 - Timeouts: clone 30 s, pull 10 s, push 20 s.
 - The hook never blocks a session: every failure path prints one line and exits 0.
 - `add` writes the note and commits before any network call. A failed push leaves the commit local and prints "mind: push failed, note is committed locally; it will push on the next remember or session start" — true: `inject` on `startup`/`resume` syncs, not just pulls, so that commit goes out on the next session start even if the owner never runs `/mind:remember` again.
