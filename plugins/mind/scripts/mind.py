@@ -841,6 +841,27 @@ def _proposal_body(rows: list[tuple[str, "Note"]], cwd_slug: str) -> str:
     return "".join(out)
 
 
+def _remove_worktree(cfg: Config, wt: Path) -> str | None:
+    """Remove the temporary proposal worktree and prune, tolerating a slow
+    or failing git rather than raising: a hung/failed removal here must
+    never mask a result the caller already computed (a success replaced by
+    an uncaught traceback, worse than the stale worktree itself), and a
+    returncode failure must be visible instead of silently leaving `wt`
+    behind. Returns a suffix to append to the caller's message, or None."""
+    ok = True
+    try:
+        remove_proc = git(cfg, ["worktree", "remove", "--force", "--", str(wt)], cfg.home, 20)
+        ok = remove_proc.returncode == 0
+    except subprocess.TimeoutExpired:
+        ok = False
+    try:
+        prune_proc = git(cfg, ["worktree", "prune"], cfg.home, 10)
+        ok = ok and prune_proc.returncode == 0
+    except subprocess.TimeoutExpired:
+        ok = False
+    return None if ok else f"; worktree cleanup failed, remove {wt} by hand"
+
+
 def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project: str | None,
                 body: Path | None, cwd: Path) -> str:
     """Write proposals in a temporary git worktree of the data repo, never in
@@ -905,8 +926,9 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
     if proc.returncode != 0:
         raise ValidationError("worktree failed: " + _redact((proc.stderr.strip().splitlines() or ["unknown"])[-1], cfg))
     wcfg = dataclasses.replace(cfg, home=wt)
-    rows: list[tuple[str, Note]] = []
-    try:
+
+    def _write_and_open_pr() -> str:
+        rows: list[tuple[str, Note]] = []
         for d, meta, text, draft_scope in parsed:
             eff_scope, eff_project = scope, project
             if draft_scope == "global":
@@ -963,13 +985,24 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
                 return _prefixed(f"mind: proposed {n} {noun} on {branch}, open the PR by hand")
             url = created.stdout.strip().splitlines()[-1]
         return _prefixed(f"mind: proposed {n} {noun} on {branch}, PR {_redact(url, cfg)}")
+
+    cleanup_warning = None
+    try:
+        result = _write_and_open_pr()
     finally:
         if body is None:
             # Only the body file this call generated itself, never one the
             # caller supplied with --body.
             (cfg.home.parent / f"proposal-{topic_slug}.md").unlink(missing_ok=True)
-        git(cfg, ["worktree", "remove", "--force", "--", str(wt)], cfg.home, 20)
-        git(cfg, ["worktree", "prune"], cfg.home, 10)
+        # A stuck or failing removal must never raise past this finally:
+        # that would replace an already-successful result (rows written,
+        # branch pushed, PR opened) with an uncaught traceback, and hide a
+        # returncode failure with no line printed at all, leaving a stale
+        # worktree behind silently.
+        cleanup_warning = _remove_worktree(cfg, wt)
+    if cleanup_warning:
+        result += cleanup_warning
+    return result
 
 
 def _default_branch(cfg: Config) -> str:

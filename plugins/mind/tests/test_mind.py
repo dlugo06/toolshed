@@ -2098,6 +2098,54 @@ def test_cmd_propose_removes_worktree_on_commit_failure(repo, tmp_path, monkeypa
     assert _git(["worktree", "list"], cfg.home).stdout.count("\n") == 1
 
 
+def test_cmd_propose_reports_worktree_cleanup_failure_but_keeps_pr_result(repo, tmp_path, monkeypatch):
+    """SF7: a failed worktree removal (a locked ref, e.g.) must be visible
+    to the owner -- previously nothing was printed and a stale worktree
+    was silently left behind."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:2] == ["worktree", "remove"]:
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="fatal: locked\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    wt = mind._worktree_path(cfg, "propose/2026-09-12-x")
+    assert out == (f"mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+                    f"; worktree cleanup failed, remove {wt} by hand")
+
+
+def test_cmd_propose_worktree_cleanup_timeout_does_not_eat_success(repo, tmp_path, monkeypatch):
+    """SF7: the finally clause's own worktree remove/prune calls used to be
+    unguarded -- a TimeoutExpired there replaced an already-successful
+    result with an uncaught traceback, even though the PR was genuinely
+    open. It must instead append the cleanup warning to that result."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:2] == ["worktree", "remove"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    wt = mind._worktree_path(cfg, "propose/2026-09-12-x")
+    assert out == (f"mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7"
+                    f"; worktree cleanup failed, remove {wt} by hand")
+    assert list(cfg.home.parent.glob("worktree-*"))   # genuinely left behind
+
+
 def test_cmd_propose_push_failure_keeps_branch_locally(repo, tmp_path, monkeypatch):
     """Given the branch's `git push` fails / cmd_propose returns the
     committed-locally message, removes the worktree, and the branch
