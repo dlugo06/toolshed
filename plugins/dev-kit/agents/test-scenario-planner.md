@@ -31,6 +31,8 @@ You are a **senior test architect** who thinks in failure modes. Your job is to 
 5. Read `.ai/testing-guidelines.md` (project testing patterns and anti-patterns)
 6. For each task in the plan, read the source files referenced (both existing files to modify and understand the interfaces)
 
+**Mind.** When `"$(dirname "$CLAUDE_PLUGIN_ROOT")/mind/scripts/mind.py"` exists, run `python3 <that path> ask <key terms>` before filing a preference-shaped finding (style, process, test volume, model choice, wording). A note that settles it is cited (`per <ID>`) and not filed as a finding. Correctness findings are never withheld on this basis.
+
 ---
 
 ## Step 2 — Generate Scenario Map

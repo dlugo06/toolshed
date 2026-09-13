@@ -36,15 +36,18 @@ Human gates are unchanged: merge and `passes` stay with the owner.
 
 1. **New section "Consult the mind"** after "Read the world":
    - `mind.py` is at `$(dirname "$CLAUDE_PLUGIN_ROOT")/mind/scripts/mind.py`
-     when the marketplace installs plugins side by side; the reference
-     names the lookup `claude plugin list` fallback and says the orchestrator
-     is inert on mind consults, not blocked, when the plugin is absent.
+     when the marketplace installs plugins side by side. When the sibling
+     path is absent, use `$MIND_SCRIPT` if the owner exported it; when
+     neither exists, the mind is not installed: skip every consult and
+     report `Mind: not installed`. The orchestrator is inert on mind
+     consults, not blocked, in either not-installed case.
    - The stage consult table: for each transition, the `ask` terms to run
      before deciding, and what the answer governs.
 
    | transition | ask terms | governs |
    |---|---|---|
    | idea -> specced | `tier <subsystem words>`, `decision <subsystem words>` | tier choice, prior decisions the spec must honour |
+   | specced -> impact_checked | `behaviour register impact <surface words>` | rulings on impact-check conflicts |
    | impact_checked -> tests_planned | `scenario defensive critical` | test-plan flag rulings |
    | tests_planned -> implementing | `implementer brief tests` | brief wording, test bound |
    | implementing -> evaluated | `review ruling <finding words>` | rulings on the whole-branch and review-tests reports |

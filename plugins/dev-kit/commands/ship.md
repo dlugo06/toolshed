@@ -20,7 +20,7 @@ Arguments: `[--full|--fix|--light] [--reviewed] [PR title override]` — e.g. `/
 
 All launched reviewer agents run with `model: "opus"` passed on the Agent call, regardless of tier. They are the only Opus dispatches ship makes.
 
-Every reviewer brief is under 150 words and carries the input contract: the PR number; "read `gh pr diff` once; read full files only for the functions the diff touches; do not re-read specs; findings only, no restatement; report under 400 words; end with one line naming what you did not read"; and "the PR body's Rulings section and the plan's Rulings section are decided, not findings". Do not paste the spec, plan, test plan or impact report into the brief; name the plan path only.
+Every reviewer brief is under 150 words and carries the input contract: the PR number; "read `gh pr diff` once; read full files only for the functions the diff touches; do not re-read specs; findings only, no restatement; report under 400 words; end with one line naming what you did not read"; and "the PR body's Rulings section and the plan's Rulings section are decided, not findings". A mind note that settles a style or process point makes it not a finding; cite the ID instead. Do not paste the spec, plan, test plan or impact report into the brief; name the plan path only.
 
 ## Steps
 
@@ -149,7 +149,7 @@ Body template:
 <1-3 bullet points summarizing ALL commits on this branch>
 
 ## Rulings
-<one line per reviewer finding that was deferred or rejected by an earlier stage (the whole-branch review, review-tests, check-impact), with where it is recorded (PRD follow-up, spec section). Omit the section when there are none.>
+<one line per reviewer finding that was deferred or rejected by an earlier stage (the whole-branch review, review-tests, check-impact), with where it is recorded (PRD follow-up, spec section); each line ends with `[per <ID>]` or `[provisional]`. Omit the section when there are none.>
 
 ## Test plan
 - [ ] All tests pass

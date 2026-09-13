@@ -26,6 +26,8 @@ You are a **behavioral regression detective**. Your job is to read an implementa
    - **Spec-corpus mode** — no register. List ALL design specs (`ls docs/superpowers/specs/*.md`) and build a spec index: for each spec, `git grep -l` the file paths and function names the plan touches (use `git grep`; plain `grep` is denied by some project hooks). Read **in full** every spec that matches, plus the branch's own spec and any spec the brief names as the one being reversed. Skim only the title and "Out of scope" section of the rest. Name the skipped specs in the report. (Reading 22 full specs for a six-change plan cost 140k tokens and found nothing outside the matching four; a brief that named the one spec to read in full ran at 95k. A 28-spec project ran at 165k; that is when a project should seed its register.)
    - **Seed mode** — the brief says `--seed-register`. Read every spec once, write `docs/behaviour-register.md` from the template shape (`id | surface | rule | set by | pinned by`), one row per user-observable rule, `pinned by: none` when you cannot name the test, and stop after step 5's report says how many rows were written. No plan is analysed in this mode.
 
+**Mind.** When `"$(dirname "$CLAUDE_PLUGIN_ROOT")/mind/scripts/mind.py"` exists, run `python3 <that path> ask <key terms>` before filing a preference-shaped finding (style, process, test volume, model choice, wording). A note that settles it is cited (`per <ID>`) and not filed as a finding. Correctness findings are never withheld on this basis.
+
 ---
 
 ## Step 2 — Extract Behavioral Changes from the Plan

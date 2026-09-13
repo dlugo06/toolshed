@@ -7,7 +7,7 @@ Process review comments on a PR: read each comment, fix or reject with reasoning
 
 Arguments: PR number, then optional flags (e.g., `/dev-kit:process-review 48`, `/dev-kit:process-review 48 --autonomous --no-replies`).
 
-- `--autonomous`: the caller is the orchestrator or the owner has said the run is unattended. The decision table is still produced, but instead of stopping for approval it is ruled on from the project's stored preferences (auto-memory, `CLAUDE.md`, prior decision tables) and **posted as a PR comment** titled `process-review decision table (<date>)`; that comment is the audit record the owner reads later. Without the flag, step 4's STOP applies.
+- `--autonomous`: the caller is the orchestrator or the owner has said the run is unattended. The decision table is still produced, but instead of stopping for approval it is ruled on from the project's stored preferences (auto-memory, `CLAUDE.md`, prior decision tables) and **posted as a PR comment** titled `process-review decision table (<date>)`; that comment is the audit record the owner reads later. Without the flag, step 4's STOP applies. Each row of the decision table carries a `Basis` column: the mind note ID that settles it (`python3 "$(dirname "$CLAUDE_PLUGIN_ROOT")/mind/scripts/mind.py" ask <finding words>`) or `provisional`. The posted table keeps the column. The command ends by listing the provisional rows: the orchestrator proposes them on the data repo, an interactive run tells the owner.
 - `--no-replies`: skip the per-thread replies in step 7 (the owner reads the table instead). The table is never skipped.
 
 ## Steps
@@ -107,12 +107,14 @@ For each piece of feedback:
 Present a summary table to the user BEFORE taking action:
 
 ```
-| # | Source | File:Line | Reviewer | Comment (truncated) | Decision | Reasoning |
-|---|--------|-----------|----------|---------------------|----------|-----------|
-| 1 | thread | src/foo.py:87 | @copilot | Missing validation... | Fix | Valid -- no input check |
-| 2 | thread | src/bar.py:15 | @copilot | Should use async... | Reject | Current pattern is intentional |
-| 3 | review body | — | @reviewer | Overall approach... | Fix | Valid architectural concern |
+| # | Source | File:Line | Reviewer | Comment (truncated) | Decision | Basis | Reasoning |
+|---|--------|-----------|----------|---------------------|----------|-------|-----------|
+| 1 | thread | src/foo.py:87 | @copilot | Missing validation... | Fix | provisional | Valid -- no input check |
+| 2 | thread | src/bar.py:15 | @copilot | Should use async... | Reject | provisional | Current pattern is intentional |
+| 3 | review body | — | @reviewer | Overall approach... | Fix | per PREF-REV-003 | Valid architectural concern |
 ```
+
+The `Basis` column's `provisional` / `per <ID>` values are the same concept as the `[provisional]` / `[per <ID>]` suffix used on rulings elsewhere (`ship.md`, `plan-tests.md`, `check-impact.md`, the orchestrator reference); the table cell omits the brackets.
 
 ## **STOP. Wait for user approval before proceeding. Do NOT apply any fixes until the user confirms.** (With `--autonomous`: rule on every row from stored preferences, post the table on the PR, and continue. A row you cannot rule on from the record is `Reject (needs owner)` with the question in the reasoning column, never a silent fix.)
 

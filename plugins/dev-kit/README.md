@@ -32,6 +32,10 @@ Flags that matter:
 - `process-review <PR#> [--autonomous] [--no-replies]` — `--autonomous` rules from stored preferences and posts the decision table on the PR; findings that re-open a recorded ruling are `Reject (decided)`; tiny test-only waves are applied by the caller instead of dispatching a fixer.
 - `plan-tests [plan path] [--fix|--standard|--full]` — bounds the scenario count; rows are Critical or Defensive, and implementers write plan-named tests plus Critical rows only.
 
+## Mind
+
+When the `mind` plugin is installed side by side, rulings and findings cite it instead of being decided from memory alone. `process-review --autonomous`'s decision table carries a `Basis` column: a mind note ID that settles the row, or `provisional`; the command lists the provisional rows at the end for the caller (or the orchestrator) to propose. `ship`'s PR body Rulings section and the rulings `plan-tests` and `check-impact` record each end with `[per <ID>]` or `[provisional]`. The four review/planning agents (`pr-reviewer`, `test-quality-reviewer`, `behavioral-impact-checker`, `test-scenario-planner`) run `mind.py ask <key terms>` before filing a preference-shaped finding (style, process, test volume, model choice); a settling note is cited instead of filed. Correctness findings are never withheld on this basis. Without the `mind` plugin installed, none of this changes behavior — the consult step is simply skipped.
+
 ## Hooks
 
 `hooks/hooks.json` registers two `PreToolUse` guards (matcher: `Bash`) backed by scripts in `scripts/`:

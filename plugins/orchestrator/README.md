@@ -28,6 +28,10 @@ Optional: install the [`gh` CLI](https://cli.github.com) and authenticate it. Wh
 
 The SessionStart hook prints what is in flight so a fresh session starts with the next action on screen.
 
+## Consult the mind
+
+When the `mind` plugin is installed side by side, every ruling the orchestrator makes on the owner's behalf follows **decide, cite, or propose**: before deciding, it runs `mind.py ask <terms>` (the stage consult table is in `reference/orchestrator.md`, §Consult the mind); a settling note is applied and cited `[per <ID>]`, otherwise the ruling is applied anyway and marked `[provisional]`. At the end of a transition, every provisional ruling is drafted as a note and delivered in one pull request on the data repo via `mind.py propose`; the PR URL goes on the progress line and in the report. An owner statement made during the run goes through `mind.py add` immediately. A ruling that would change a `must` note's effect is never provisional — the note is applied, or the orchestrator records `blocked_reason` and stops. Without the `mind` plugin, every consult is skipped and the report says `Mind: not installed`; nothing else changes. The report gains two lines: `Mind: consulted <IDs or none | not installed>` and `Proposals: <PR url or none>`.
+
 ## State
 
 State lives on the PRD items: `stage`, `tier`, `agents`, `branch`, `pr`, `disposition`, `blocked_reason`, `updated`. `passes` belongs to the owner. The stage machine, pipeline tiers (`fix`, `standard`, `full`, each with a subagent cap and a model table), selection rules, ship tiers and guardrails are in `reference/orchestrator.md`.

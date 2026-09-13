@@ -1,6 +1,6 @@
 {
   "name": "orchestrator",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Cross-project work router. Reads every project's PRD items, assigns each a pipeline stage, runs the single next transition, and stops at human gates.",
   "author": {
     "name": "dlugo06",
