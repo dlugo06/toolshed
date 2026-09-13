@@ -3174,27 +3174,52 @@ def test_doctor_upstream_checks_main_specifically_not_current_head(repo, monkeyp
     assert out[2] == "upstream: main tracks origin/main"
 
 
+def test_normalize_repo_url_equates_scp_and_ssh_forms():
+    """PR #11 review, finding 3: scp (`git@host:o/r`) and `ssh://host/o/r`
+    name the same remote and must normalize equal."""
+    assert mind._normalize_repo_url("git@example.test:o/r.git") == mind._normalize_repo_url("ssh://example.test/o/r")
+
+
+def test_normalize_repo_url_equates_ssh_userinfo_and_port_with_scp():
+    assert mind._normalize_repo_url("ssh://git@example.test:2222/o/r") == mind._normalize_repo_url("git@example.test:o/r")
+
+
+def test_normalize_repo_url_ignores_trailing_slash():
+    assert mind._normalize_repo_url("https://example.test/o/r/") == mind._normalize_repo_url("https://example.test/o/r")
+
+
+def test_normalize_repo_url_equates_file_scheme_and_bare_path():
+    assert mind._normalize_repo_url("file:///data/repo.git") == mind._normalize_repo_url("/data/repo")
+
+
+def test_normalize_repo_url_lowercases_host():
+    assert mind._normalize_repo_url("https://Example.TEST/o/r") == mind._normalize_repo_url("https://example.test/o/r")
+
+
+def test_normalize_repo_url_reports_a_real_mismatch():
+    assert mind._normalize_repo_url("https://example.test/o/r") != mind._normalize_repo_url("https://example.test/o/other")
+
+
 def test_doctor_reports_remote_mismatch_when_origin_differs_from_mind_repo(repo, monkeypatch):
     """When the checkout's origin was cloned from one repo but MIND_REPO now
     points somewhere else (a copy-pasted config, a rotated data repo URL),
-    doctor must say so plainly instead of reporting reachability against a
-    repo the checkout doesn't actually use."""
+    doctor must say so plainly, but must still probe MIND_REPO's own
+    reachability on its own line -- the one check a second machine or
+    cloud session runs doctor for must never be skipped just because this
+    checkout's origin points elsewhere (PR #11 review, finding 3)."""
     cfg, bare, _ = repo
     mind.cmd_init(cfg)
     # A credentialed origin (a natural leftover from a prior MIND_TOKEN
     # session) must never reach stdout unredacted on this line either.
     _git(["remote", "set-url", "origin", f"https://x-access-token:sekrit@example.test{bare}"], cfg.home)
     monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
-
-    def unexpected(c):
-        raise AssertionError("_remote_reachable must not run when origin mismatches MIND_REPO")
-
-    monkeypatch.setattr(mind, "_remote_reachable", unexpected)
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
     mismatched_repo = str(bare) + "-other"
     cfg2 = dataclasses.replace(cfg, repo=mismatched_repo)
     out = mind.cmd_doctor(cfg2)
     lines = out.splitlines()
     assert lines[3] == f"remote: origin https://***@example.test{bare} does not match MIND_REPO"
+    assert lines[4] == "remote: reachable (12 ms)"
     assert "sekrit" not in out
 
 

@@ -1443,15 +1443,30 @@ def _checkout_state(cfg: Config) -> str:
     return "ok"
 
 
-_USERINFO_RE = re.compile(r"://[^/@]+@")
+_SCP_REPO_RE = re.compile(r"^[^@/\s]+@(?P<host>[^:/\s]+):(?P<path>.+)$")
+_NETWORK_REPO_RE = re.compile(r"^(?:ssh|https)://(?:[^@/]+@)?(?P<host>[^/:]+)(?::\d+)?/(?P<path>.+)$")
+_FILE_REPO_RE = re.compile(r"^file://(?P<path>/.+)$")
 
 
 def _normalize_repo_url(url: str) -> str:
-    """For comparing a checkout's `origin` against MIND_REPO: strip a
-    userinfo credential (`://user@`) and a single trailing `.git`, both
-    cosmetic differences that must never read as a different remote."""
-    url = _USERINFO_RE.sub("://", url.strip())
-    return url[:-len(".git")] if url.endswith(".git") else url
+    """For comparing a checkout's `origin` against MIND_REPO: every
+    documented MIND_REPO form -- scp (`git@host:o/r`),
+    `ssh://[user@]host[:port]/o/r`, `https://[user@]host/o/r`,
+    `file:///path` and a bare absolute path -- must compare equal to
+    whichever other form names the same remote, so a checkout cloned in
+    one spelling doesn't false-positive a mismatch against MIND_REPO
+    written in another. Normalises a network remote to `host/o/r`
+    (lowercased host) and a local one to its bare path, then strips a
+    trailing slash and a single trailing `.git`, both cosmetic."""
+    url = url.strip()
+    m = _FILE_REPO_RE.match(url)
+    if m:
+        normalized = m.group("path")
+    else:
+        m = _NETWORK_REPO_RE.match(url) or _SCP_REPO_RE.match(url)
+        normalized = f"{m.group('host').lower()}/{m.group('path')}" if m else url
+    normalized = normalized.rstrip("/")
+    return normalized[: -len(".git")] if normalized.endswith(".git") else normalized
 
 
 def _origin_url(cfg: Config) -> str | None:
@@ -1532,12 +1547,13 @@ def cmd_doctor(cfg: Config) -> str:
         if origin is not None and _normalize_repo_url(origin) != _normalize_repo_url(cfg.repo):
             # A checkout cloned from one repo with MIND_REPO now pointing
             # elsewhere (a copy-pasted config, a rotated data repo URL):
-            # reachability against MIND_REPO would be beside the point --
-            # this checkout doesn't pull from or push to it at all.
+            # name the mismatch, but still probe MIND_REPO's own
+            # reachability below -- the one check a second machine or
+            # cloud session runs doctor for must never be skipped just
+            # because this checkout's origin points elsewhere.
             lines.append(f"remote: origin {_redact(origin, cfg)} does not match MIND_REPO")
-        else:
-            reachable, info = _remote_reachable(cfg)
-            lines.append(f"remote: reachable ({info} ms)" if reachable else f"remote: unreachable ({_redact(str(info), cfg)})")
+        reachable, info = _remote_reachable(cfg)
+        lines.append(f"remote: reachable ({info} ms)" if reachable else f"remote: unreachable ({_redact(str(info), cfg)})")
     email = _git_user_email(cfg)
     lines.append(f"identity: {email or 'none, will use mind@localhost'}")
     version_proc = _gh(cfg, ["--version"], cfg.home)
