@@ -114,6 +114,8 @@ Present a summary table to the user BEFORE taking action:
 | 3 | review body | — | @reviewer | Overall approach... | Fix | per PREF-REV-003 | Valid architectural concern |
 ```
 
+The `Basis` column's `provisional` / `per <ID>` values are the same concept as the `[provisional]` / `[per <ID>]` suffix used on rulings elsewhere (`ship.md`, `plan-tests.md`, `check-impact.md`, the orchestrator reference); the table cell omits the brackets.
+
 ## **STOP. Wait for user approval before proceeding. Do NOT apply any fixes until the user confirms.** (With `--autonomous`: rule on every row from stored preferences, post the table on the PR, and continue. A row you cannot rule on from the record is `Reject (needs owner)` with the question in the reasoning column, never a silent fix.)
 
 ### 5. Apply Fixes
