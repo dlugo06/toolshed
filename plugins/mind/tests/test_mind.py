@@ -1442,7 +1442,7 @@ def test_cmd_inject_compact_makes_no_network_call(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
     monkeypatch.setattr(mind, "pull", lambda c: pytest.fail("pull called on compact"))
-    monkeypatch.setattr(mind, "cmd_proposals", lambda c: pytest.fail("cmd_proposals called on compact"))
+    monkeypatch.setattr(mind, "_proposals", lambda c: pytest.fail("_proposals called on compact"))
     out = mind.cmd_inject(cfg, "compact", tmp_path)
     assert out.startswith(mind.PROTOCOL.format(home=cfg.home))
     assert "open proposal" not in out
@@ -1822,6 +1822,121 @@ def test_cmd_proposals_omits_merged_but_kept_remote_branch(repo, tmp_path, monke
     _git(["push", "-q"], seed)
     monkeypatch.setattr(mind, "_gh", FakeGh())
     assert mind.cmd_proposals(cfg) == []
+
+
+def test_cmd_proposals_missing_origin_main_still_lists_remote_proposal(repo, monkeypatch):
+    """SF1/PR-1: origin/main can be absent locally (a pruned ref, a fetch
+    that never landed) yet an open proposal must not vanish from the
+    list -- every --merged/--no-merged origin/main query would otherwise
+    exit non-zero with empty stdout and `proposals` would report zero."""
+    cfg, _, seed = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    _git(["checkout", "-q", "-b", "propose/2026-09-12-x"], seed)
+    (seed / "z.md").write_text("z\n")
+    _git(["add", "."], seed)
+    _git(["commit", "-q", "-m", "z"], seed)
+    _git(["push", "-q", "-u", "origin", "propose/2026-09-12-x"], seed)
+    _git(["fetch", "-q", "origin"], cfg.home)   # pick up the new remote branch once, normally
+    _git(["update-ref", "-d", "refs/remotes/origin/main"], cfg.home)
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args == ["fetch", "-q", "--prune"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    rows = mind.cmd_proposals(cfg)
+    assert ("propose/2026-09-12-x", "") in rows
+
+
+def test_cmd_proposals_default_branch_trunk_works(tmp_path, monkeypatch):
+    """SF1/PR-1: the default branch is resolved from origin/HEAD, not
+    hardcoded to "main" -- a merged proposal on a `trunk`-default data repo
+    must still be excluded, and an unmerged one still included."""
+    bare = tmp_path / "remote.git"
+    _git(["init", "--bare", "-q", "--initial-branch=trunk", str(bare)], tmp_path)
+    seed = tmp_path / "seed"
+    _git(["clone", "-q", str(bare), str(seed)], tmp_path)
+    _git(["config", "user.email", "t@example.com"], seed)
+    _git(["config", "user.name", "t"], seed)
+    (seed / "schema.md").write_text("# schema\n")
+    _git(["add", "."], seed)
+    _git(["commit", "-q", "-m", "init"], seed)
+    _git(["push", "-q", "origin", "trunk"], seed)
+    home = tmp_path / "home"
+    env = {"MIND_REPO": str(bare), "MIND_HOME": str(home)}
+    cfg = mind.Config.from_env(env, tmp_path)
+    assert mind.ensure_checkout(cfg) is None
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+
+    _git(["checkout", "-q", "-b", "propose/2026-09-12-merged"], seed)
+    (seed / "m.md").write_text("m\n")
+    _git(["add", "."], seed)
+    _git(["commit", "-q", "-m", "m"], seed)
+    _git(["push", "-q", "-u", "origin", "propose/2026-09-12-merged"], seed)
+    _git(["checkout", "-q", "trunk"], seed)
+    _git(["merge", "-q", "--ff-only", "propose/2026-09-12-merged"], seed)
+    _git(["push", "-q"], seed)
+
+    _git(["checkout", "-q", "-b", "propose/2026-09-12-open"], seed)
+    (seed / "o.md").write_text("o\n")
+    _git(["add", "."], seed)
+    _git(["commit", "-q", "-m", "o"], seed)
+    _git(["push", "-q", "-u", "origin", "propose/2026-09-12-open"], seed)
+
+    assert mind.cmd_proposals(cfg) == [("propose/2026-09-12-open", "")]
+
+
+def test_cmd_propose_sibling_id_from_unpushed_local_branch_is_skipped(repo, tmp_path, monkeypatch):
+    """SF8: a prior batch whose push failed exists only as a local
+    refs/heads/propose/* branch; the next batch must not reassign the ID
+    it already claimed there -- previously only origin/propose/* was
+    scanned."""
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    _git(["checkout", "-q", "-b", "propose/2026-09-12-stuck"], cfg.home)
+    note = mind.render_frontmatter(
+        {"id": "PRIN-TEST-001", "title": "Stuck", "type": "principle", "stage": "testing", "scope": "global",
+         "strength": "must", "status": "accepted", "affirmed": "2026-09-12", "supersedes": None, "source": "t"},
+        "stuck.\n")
+    notes_dir = cfg.home / "global" / "notes"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    (notes_dir / "PRIN-TEST-001-stuck.md").write_text(note)
+    _git(["add", "."], cfg.home)
+    _git(["commit", "-q", "-m", "stuck"], cfg.home)
+    _git(["checkout", "-q", "main"], cfg.home)
+
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "digest-run", "global", None, None, tmp_path)
+    assert out == "mind: proposed 1 note on propose/2026-09-12-digest-run, PR https://example.test/pr/7"
+    log = _git(["log", "--format=%s", "propose/2026-09-12-digest-run"], bare).stdout
+    assert "mind: propose PRIN-TEST-002" in log
+
+
+def test_cmd_propose_fetch_failure_returncode_reports_local_copy_and_proceeds(repo, tmp_path, monkeypatch):
+    """SF8: a fetch that returns a plain error (not a timeout) must be
+    caught too -- propose proceeds from the local copy of origin/main and
+    says so, instead of only handling TimeoutExpired."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", FakeGh())
+    monkeypatch.setattr(mind, "_today", lambda: "2026-09-12")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args == ["fetch", "-q", "origin"]:
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="fatal: unable to access\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    d = tmp_path / "a.md"; d.write_text(DRAFT)
+    out = mind.cmd_propose(cfg, [d], "x", "global", None, None, tmp_path)
+    assert out == ("mind: fetch failed, proposing from the local copy; "
+                    "mind: proposed 1 note on propose/2026-09-12-x, PR https://example.test/pr/7")
 
 
 def test_cmd_propose_concurrent_inject_sees_no_unmerged_note(repo, tmp_path, monkeypatch):
@@ -2502,7 +2617,7 @@ def test_load_settings_corrupt_json_returns_defaults(repo):
 def test_inject_mode_proposals_and_pending_lines(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
-    monkeypatch.setattr(mind, "cmd_proposals", lambda c: [("propose/2026-09-12-x", "https://example.test/pr/9")])
+    monkeypatch.setattr(mind, "_proposals", lambda c: ([("propose/2026-09-12-x", "https://example.test/pr/9")], None))
     pending = cfg.home.parent / "pending.jsonl"
     pending.write_text("".join(f'{{"ts": "2026-09-12T10:00:{i:02d}Z", "prompt": "p{i}"}}\n' for i in range(25)))
     mind.mark_pending(cfg, "2026-09-12T10:00:04Z")
@@ -2524,7 +2639,7 @@ def test_inject_proposals_capped_at_five_with_more_line(repo, tmp_path, monkeypa
     cfg, _, _ = repo
     mind.cmd_init(cfg)
     rows = [(f"propose/2026-09-{i:02d}-x", f"https://example.test/pr/{i}") for i in range(1, 8)]
-    monkeypatch.setattr(mind, "cmd_proposals", lambda c: rows)
+    monkeypatch.setattr(mind, "_proposals", lambda c: (rows, None))
     out = mind.cmd_inject(cfg, "startup", tmp_path)
     assert "7 open proposals: propose/2026-09-01-x https://example.test/pr/1\n" in out
     for b, u in rows[1:5]:

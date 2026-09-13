@@ -781,14 +781,31 @@ _FILENAME_ID_RE = re.compile(r"^([A-Z]+-[A-Z]+-\d{3})-")
 
 def _sibling_proposal_ids(cfg: Config, own_branch: str, rel_dir: str) -> frozenset[str]:
     """IDs already claimed in `rel_dir` (e.g. "global/notes") by *other*
-    unmerged propose/* branches on the remote: two same-day proposals from
-    different topics (a digest and a revise-<ID>) both starting from
-    origin/main must never assign the same next ID."""
+    unmerged propose/* branches: two same-day proposals from different
+    topics (a digest and a revise-<ID>) both starting from origin/main must
+    never assign the same next ID. Scans remote propose/* branches (the
+    common case) plus local-only ones (a prior batch whose push failed, so
+    it never reached the remote and would otherwise be invisible here) --
+    a branch present in both is only scanned once, from the remote. Both
+    listings' returncodes are checked: a failed `branch` call contributes
+    no IDs rather than raising."""
     ids: set[str] = set()
-    proc = git(cfg, ["branch", "-r", "--list", "origin/propose/*", "--format=%(refname:short)"], cfg.home, 5)
-    for ref in proc.stdout.split():
-        if not ref or ref == f"origin/{own_branch}":
-            continue
+    refs: list[str] = []
+    remote = git(cfg, ["branch", "-r", "--list", "origin/propose/*", "--format=%(refname:short)"], cfg.home, 5)
+    remote_short: set[str] = set()
+    if remote.returncode == 0:
+        for ref in remote.stdout.split():
+            if not ref or ref == f"origin/{own_branch}":
+                continue
+            refs.append(ref)
+            remote_short.add(ref.removeprefix("origin/"))
+    local = git(cfg, ["branch", "--list", "propose/*", "--format=%(refname:short)"], cfg.home, 5)
+    if local.returncode == 0:
+        for ref in local.stdout.split():
+            if not ref or ref == own_branch or ref in remote_short:
+                continue
+            refs.append(ref)
+    for ref in refs:
         listing = git(cfg, ["ls-tree", "-r", "--name-only", ref, "--", "global/notes", "projects"], cfg.home, 10)
         if listing.returncode != 0:
             continue
@@ -840,12 +857,21 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
     topic_slug = _slugify(topic)
     _validate_slug(topic_slug)
     branch = f"propose/{_today()}-{topic_slug}"
+    fetch_warning = None
     try:
-        git(cfg, ["fetch", "-q", "origin"], cfg.home, GIT_TIMEOUTS["pull"])
+        fetch_proc = git(cfg, ["fetch", "-q", "origin"], cfg.home, GIT_TIMEOUTS["pull"])
+        if fetch_proc.returncode != 0:
+            # A reachable-but-erroring remote (as opposed to a timeout):
+            # proceed from whatever origin/main the local checkout already
+            # has, same as the timeout case, but say so in the result.
+            fetch_warning = "mind: fetch failed, proposing from the local copy"
     except subprocess.TimeoutExpired:
         # Offline: proceed from whatever origin/main the local checkout
         # already has; the PR gets rebased on merge if it moved meanwhile.
         pass
+
+    def _prefixed(msg: str) -> str:
+        return f"{fetch_warning}; {msg}" if fetch_warning else msg
     wt = _worktree_path(cfg, branch)
     remote_has = git(cfg, ["rev-parse", "--verify", "-q", f"origin/{branch}"], cfg.home, 5).returncode == 0
     local_has = git(cfg, ["rev-parse", "--verify", "-q", f"refs/heads/{branch}"], cfg.home, 5).returncode == 0
@@ -901,9 +927,9 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
         try:
             push_proc = git(wcfg, ["push", "-q", "-u", "origin", branch], wt, GIT_TIMEOUTS["push"])
         except subprocess.TimeoutExpired:
-            return f"mind: proposal branch {branch} is committed locally; push failed"
+            return _prefixed(f"mind: proposal branch {branch} is committed locally; push failed")
         if push_proc.returncode != 0:
-            return f"mind: proposal branch {branch} is committed locally; push failed"
+            return _prefixed(f"mind: proposal branch {branch} is committed locally; push failed")
         n = len(rows)
         noun = "note" if n == 1 else "notes"
         body_file = body or (cfg.home.parent / f"proposal-{topic_slug}.md")
@@ -911,7 +937,7 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
             body_file.write_text(_proposal_body(rows, resolve_candidate(cfg, cwd)), encoding="utf-8")
         listing = _gh(cfg, ["pr", "list", "--head", branch, "--json", "url"], cfg.home)
         if listing is None:
-            return f"mind: proposed {n} {noun} on {branch}, open the PR by hand"
+            return _prefixed(f"mind: proposed {n} {noun} on {branch}, open the PR by hand")
         try:
             found = json.loads(listing.stdout or "[]")
         except json.JSONDecodeError:
@@ -922,9 +948,9 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
             created = _gh(cfg, ["pr", "create", "--base", "main", "--head", branch, "--title",
                                 f"mind: {topic} ({n} {noun})", "--body-file", str(body_file)], cfg.home)
             if created is None or created.returncode != 0:
-                return f"mind: proposed {n} {noun} on {branch}, open the PR by hand"
+                return _prefixed(f"mind: proposed {n} {noun} on {branch}, open the PR by hand")
             url = created.stdout.strip().splitlines()[-1]
-        return f"mind: proposed {n} {noun} on {branch}, PR {_redact(url, cfg)}"
+        return _prefixed(f"mind: proposed {n} {noun} on {branch}, PR {_redact(url, cfg)}")
     finally:
         if body is None:
             # Only the body file this call generated itself, never one the
@@ -934,48 +960,91 @@ def cmd_propose(cfg: Config, drafts: list[Path], topic: str, scope: str, project
         git(cfg, ["worktree", "prune"], cfg.home, 10)
 
 
-def cmd_proposals(cfg: Config) -> list[tuple[str, str]]:
-    """Remote proposal branches not yet merged into origin/main, with their PR
-    URL, plus local propose/* branches that never reached the remote (a
-    failed push), marked "(unpushed)" so a stuck proposal is visible to the
-    owner. A merged proposal (the PR landed, whether or not GitHub or the
-    owner deleted the remote branch) must stop nagging forever: `--no-merged
-    origin/main` drops it from both lists, and a merged local branch (the
-    worktree's `remove` never deletes the branch it created) is deleted with
-    `branch -d`, safe by definition."""
-    try:
-        git(cfg, ["fetch", "-q", "--prune"], cfg.home, GIT_TIMEOUTS["pull"])
-    except subprocess.TimeoutExpired:
-        # Offline: fall through and report whatever the last fetch left in
-        # the local refs, same "cached copy" contract as sync()/pull().
-        pass
-    merged = git(cfg, ["branch", "--list", "propose/*", "--merged", "origin/main",
-                       "--format=%(refname:short)"], cfg.home, 5)
-    for b in merged.stdout.split():
-        if b:
-            # Already proven merged into origin/main above, so -D (rather
-            # than -d) is still safe here: plain -d's own safety check is
-            # against HEAD or the branch's upstream, and HEAD (the shared
-            # checkout's local main) commonly lags origin/main until the
-            # next sync, and the branch's own upstream ref is typically
-            # gone by now (the remote propose/* branch was deleted on
-            # merge).
-            git(cfg, ["branch", "-D", "--", b], cfg.home, 5)
-    proc = git(cfg, ["branch", "-r", "--list", "origin/propose/*", "--no-merged", "origin/main",
-                     "--format=%(refname:short)"], cfg.home, 5)
-    branches = [b.removeprefix("origin/") for b in proc.stdout.split() if b]
-    local = git(cfg, ["branch", "--list", "propose/*", "--no-merged", "origin/main",
-                      "--format=%(refname:short)"], cfg.home, 5)
-    unpushed = [b for b in local.stdout.split() if b and b not in branches]
+def _default_branch(cfg: Config) -> str:
+    """The data repo's default branch, from origin's HEAD symref (set at
+    clone time, or by `git remote set-head`); falls back to "main" when
+    that symref is unresolvable. 0.1.0/0.2.0 hardcoded "main" everywhere,
+    which broke on any data repo whose default branch is named
+    differently."""
+    proc = git(cfg, ["symbolic-ref", "-q", "refs/remotes/origin/HEAD"], cfg.home, 5)
+    if proc.returncode == 0:
+        prefix = "refs/remotes/origin/"
+        ref = proc.stdout.strip()
+        if ref.startswith(prefix) and ref[len(prefix):]:
+            return ref[len(prefix):]
+    return "main"
+
+
+def _open_pr_urls(cfg: Config) -> dict[str, str]:
     urls: dict[str, str] = {}
-    listing = _gh(cfg, ["pr", "list", "--state", "open", "--json", "headRefName,url"], cfg.home)
+    listing = _gh(cfg, ["pr", "list", "--state", "open", "--limit", "100", "--json", "headRefName,url"],
+                  cfg.home, timeout=10)
     if listing is not None and listing.returncode == 0:
         try:
             for row in json.loads(listing.stdout or "[]"):
                 urls[row.get("headRefName", "")] = row.get("url", "")
         except json.JSONDecodeError:
             pass
-    return [(b, urls.get(b, "")) for b in branches] + [(b, "(unpushed)") for b in unpushed]
+    return urls
+
+
+def _proposals(cfg: Config) -> tuple[list[tuple[str, str]], str | None]:
+    """Remote proposal branches not yet merged into origin/<default>, with
+    their PR URL, plus local propose/* branches that never reached the
+    remote (a failed push), marked "(unpushed)" so a stuck proposal is
+    visible to the owner. A merged proposal (the PR landed, whether or not
+    GitHub or the owner deleted the remote branch) must stop nagging
+    forever: `--no-merged origin/<default>` drops it from both lists, and a
+    merged local branch (the worktree's `remove` never deletes the branch
+    it created) is deleted with `branch -d`, safe by definition.
+
+    Returns (rows, warning): warning is set when origin/<default> itself is
+    absent (a brand-new data repo, a pruned ref, an unfetched clone) --
+    every --merged/--no-merged query above would otherwise exit non-zero
+    with empty stdout and silently report zero proposals. In that case rows
+    falls back to every propose/* branch, unfiltered by merge state."""
+    try:
+        git(cfg, ["fetch", "-q", "--prune"], cfg.home, GIT_TIMEOUTS["pull"])
+    except subprocess.TimeoutExpired:
+        # Offline: fall through and report whatever the last fetch left in
+        # the local refs, same "cached copy" contract as sync()/pull().
+        pass
+    default_branch = _default_branch(cfg)
+    origin_default = f"origin/{default_branch}"
+    merged = git(cfg, ["branch", "--list", "propose/*", "--merged", origin_default,
+                       "--format=%(refname:short)"], cfg.home, 5)
+    remote_proc = git(cfg, ["branch", "-r", "--list", "origin/propose/*", "--no-merged", origin_default,
+                     "--format=%(refname:short)"], cfg.home, 5)
+    local_proc = git(cfg, ["branch", "--list", "propose/*", "--no-merged", origin_default,
+                      "--format=%(refname:short)"], cfg.home, 5)
+    if merged.returncode != 0 or remote_proc.returncode != 0 or local_proc.returncode != 0:
+        remote_all = git(cfg, ["branch", "-r", "--list", "origin/propose/*",
+                               "--format=%(refname:short)"], cfg.home, 5)
+        branches = [b.removeprefix("origin/") for b in remote_all.stdout.split() if b]
+        local_all = git(cfg, ["branch", "--list", "propose/*",
+                              "--format=%(refname:short)"], cfg.home, 5)
+        unpushed = [b for b in local_all.stdout.split() if b and b not in branches]
+        urls = _open_pr_urls(cfg)
+        rows = [(b, urls.get(b, "")) for b in branches] + [(b, "(unpushed)") for b in unpushed]
+        return rows, f"mind: proposals unfiltered (no {origin_default})"
+    for b in merged.stdout.split():
+        if b:
+            # Already proven merged into origin/<default> above, so -D
+            # (rather than -d) is still safe here: plain -d's own safety
+            # check is against HEAD or the branch's upstream, and HEAD (the
+            # shared checkout's local main) commonly lags origin/<default>
+            # until the next sync, and the branch's own upstream ref is
+            # typically gone by now (the remote propose/* branch was
+            # deleted on merge).
+            git(cfg, ["branch", "-D", "--", b], cfg.home, 5)
+    branches = [b.removeprefix("origin/") for b in remote_proc.stdout.split() if b]
+    unpushed = [b for b in local_proc.stdout.split() if b and b not in branches]
+    urls = _open_pr_urls(cfg)
+    return [(b, urls.get(b, "")) for b in branches] + [(b, "(unpushed)") for b in unpushed], None
+
+
+def cmd_proposals(cfg: Config) -> list[tuple[str, str]]:
+    return _proposals(cfg)[0]
 
 
 PENDING_CAP = 2 * 1024 * 1024
@@ -1541,12 +1610,14 @@ def cmd_inject(cfg: Config, event: str, cwd: Path) -> str:
     cache = _proposals_cache(cfg)
     if event in ("startup", "resume"):
         try:
-            rows = cmd_proposals(cfg)
+            rows, warning = _proposals(cfg)
         except Exception:
             # inject must never lose the payload already built above over a
             # proposals-listing failure (a hung git or gh call): degrade to
             # no proposals line, same as having none.
-            rows = []
+            rows, warning = [], None
+        if warning:
+            out.append(warning + "\n")
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps(rows), encoding="utf-8")
     else:
