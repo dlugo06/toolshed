@@ -342,7 +342,11 @@ def _is_valid_git_dir(cfg: Config) -> bool:
 
 
 def ensure_checkout(cfg: Config) -> str | None:
-    if (cfg.home / ".git").is_dir():
+    # `.git` is a FILE, not a directory, inside a linked worktree or
+    # submodule (see _has_configured_identity); `.exists()` accepts both
+    # shapes and `_is_valid_git_dir`'s `rev-parse --git-dir` resolves either
+    # one correctly.
+    if (cfg.home / ".git").exists():
         if _has_head(cfg) or _is_valid_git_dir(cfg):
             return None
         # A clone the 30s timeout killed mid-transfer (or any other half
@@ -350,20 +354,53 @@ def ensure_checkout(cfg: Config) -> str | None:
         # Every later run would otherwise report "offline" forever and
         # inject an empty index that reads as "you have no notes".
         return f"mind: checkout at {cfg.home} is broken, delete it and rerun"
+    # A directory this call did not create must never be removed or written
+    # into: a pre-existing non-empty (or non-directory) MIND_HOME -- a
+    # crashed clone's leftovers, or the owner pointing MIND_HOME at the
+    # wrong path -- is reported directly, before any git call, rather than
+    # falling through to git clone's own "destination already exists" error.
+    existed_before = cfg.home.exists()
+    if existed_before and (not cfg.home.is_dir() or any(cfg.home.iterdir())):
+        return f"mind: {cfg.home} exists and is not a git checkout; set MIND_HOME to a clone or an empty path"
     cfg.home.parent.mkdir(parents=True, exist_ok=True)
     try:
         proc = git(cfg, ["clone", "-q", "--", cfg.repo, str(cfg.home)], cfg.home.parent, GIT_TIMEOUTS["clone"])
     except subprocess.TimeoutExpired:
-        if (cfg.home / ".git").exists():
-            shutil.rmtree(cfg.home, ignore_errors=True)
+        _cleanup_after_failed_clone(cfg, existed_before)
         return "mind: clone failed, timed out"
     if proc.returncode != 0:
-        if (cfg.home / ".git").exists():
-            shutil.rmtree(cfg.home, ignore_errors=True)
+        _cleanup_after_failed_clone(cfg, existed_before)
         stderr = proc.stderr.strip()
         msg = ("mind: clone failed, " + stderr.splitlines()[-1]) if stderr else "mind: clone failed"
         return _redact(msg, cfg)
     return None
+
+
+def _clear_directory(path: Path) -> None:
+    """Remove every entry under path, leaving path itself in place."""
+    for child in path.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+
+
+def _cleanup_after_failed_clone(cfg: Config, existed_before: bool) -> None:
+    """`git()` SIGKILLs the whole process group on timeout (see `git`), so
+    a killed or otherwise failed clone can leave a partial `.git` (or other
+    junk) behind that git itself never gets to clean up. A directory this
+    call created (existed_before is False) is removed entirely; a
+    pre-existing MIND_HOME -- already confirmed empty by the guard above --
+    is emptied back out instead, since ensure_checkout must never remove a
+    path it did not create. Leaving it non-empty here would misreport as
+    "not a git checkout" on the very next run, with mind's own leftovers as
+    the cause."""
+    if not cfg.home.exists():
+        return
+    if existed_before:
+        _clear_directory(cfg.home)
+    else:
+        shutil.rmtree(cfg.home, ignore_errors=True)
 
 
 def pull(cfg: Config) -> str | None:
@@ -1406,6 +1443,51 @@ def _checkout_state(cfg: Config) -> str:
     return "ok"
 
 
+_SCP_REPO_RE = re.compile(r"^[^@/\s]+@(?P<host>[^:/\s]+):(?P<path>.+)$")
+_NETWORK_REPO_RE = re.compile(r"^(?:ssh|https)://(?:[^@/]+@)?(?P<host>[^/:]+)(?::\d+)?/(?P<path>.+)$")
+_FILE_REPO_RE = re.compile(r"^file://(?P<path>/.+)$")
+
+
+def _normalize_repo_url(url: str) -> str:
+    """For comparing a checkout's `origin` against MIND_REPO: every
+    documented MIND_REPO form -- scp (`git@host:o/r`),
+    `ssh://[user@]host[:port]/o/r`, `https://[user@]host/o/r`,
+    `file:///path` and a bare absolute path -- must compare equal to
+    whichever other form names the same remote, so a checkout cloned in
+    one spelling doesn't false-positive a mismatch against MIND_REPO
+    written in another. Normalises a network remote to `host/o/r`
+    (lowercased host) and a local one to its bare path, then strips a
+    trailing slash and a single trailing `.git`, both cosmetic."""
+    url = url.strip()
+    m = _FILE_REPO_RE.match(url)
+    if m:
+        normalized = m.group("path")
+    else:
+        m = _NETWORK_REPO_RE.match(url) or _SCP_REPO_RE.match(url)
+        normalized = f"{m.group('host').lower()}/{m.group('path')}" if m else url
+    normalized = normalized.rstrip("/")
+    return normalized[: -len(".git")] if normalized.endswith(".git") else normalized
+
+
+def _sanitize_for_report(text: str, limit: int = 200) -> str:
+    """A value that reached this point from git output (an origin URL) can
+    itself carry embedded whitespace or newlines -- which would forge an
+    extra line into a line-oriented report like doctor's -- or unbounded
+    length. Collapse all whitespace/newlines to single spaces and cap the
+    result, before the caller redacts it."""
+    return " ".join(text.split())[:limit]
+
+
+def _origin_url(cfg: Config) -> str | None:
+    try:
+        proc = git(cfg, ["remote", "get-url", "origin"], cfg.home, 5)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
 def _remote_reachable(cfg: Config) -> tuple[bool, int | str]:
     """`git ls-remote` against cfg.repo directly (not the "origin" remote
     name), so this works even when cfg.home was never cloned."""
@@ -1473,6 +1555,15 @@ def cmd_doctor(cfg: Config) -> str:
         # probe, but still report every other line that needs no repo.
         lines.append("remote: unreachable (MIND_REPO not set)")
     else:
+        origin = _origin_url(cfg) if state == "ok" else None
+        if origin is not None and _normalize_repo_url(origin) != _normalize_repo_url(cfg.repo):
+            # A checkout cloned from one repo with MIND_REPO now pointing
+            # elsewhere (a copy-pasted config, a rotated data repo URL):
+            # name the mismatch, but still probe MIND_REPO's own
+            # reachability below -- the one check a second machine or
+            # cloud session runs doctor for must never be skipped just
+            # because this checkout's origin points elsewhere.
+            lines.append(f"remote: origin {_redact(_sanitize_for_report(origin), cfg)} does not match MIND_REPO")
         reachable, info = _remote_reachable(cfg)
         lines.append(f"remote: reachable ({info} ms)" if reachable else f"remote: unreachable ({_redact(str(info), cfg)})")
     email = _git_user_email(cfg)
