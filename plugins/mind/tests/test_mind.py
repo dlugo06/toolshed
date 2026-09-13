@@ -516,6 +516,50 @@ def test_sync_retry_pull_timeout_returns_push_failed_line(repo, monkeypatch):
     assert status == ""  # no leftover rebase state
 
 
+def test_push_appends_redacted_last_stderr_line_on_failure(repo, monkeypatch):
+    """SF5: push() discarded stderr entirely, so a hard rejection (branch
+    protection, 403) read identically to a transient failure. Append the
+    last stderr line to the push-failed message."""
+    cfg, _, _ = repo
+    (cfg.home / "a.md").write_text("a\n")
+    mind.commit_all(cfg, "mind: add a")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:1] == ["push"]:
+            return subprocess.CompletedProcess(
+                args=args, returncode=1, stdout="",
+                stderr="remote: Protected branch update failed\nfatal: push rejected\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    msg = mind.push(cfg)
+    assert msg == ("mind: push failed, note is committed locally; it will push on the next remember or "
+                    "session start: fatal: push rejected")
+
+
+def test_push_redacts_token_from_appended_stderr_line(repo, monkeypatch):
+    """SF5's appended stderr line must go through the same credential
+    redaction as every other git-stderr-derived message."""
+    cfg, _, _ = repo
+    cfg = dataclasses.replace(cfg, token="sekrit-token")
+    (cfg.home / "a.md").write_text("a\n")
+    mind.commit_all(cfg, "mind: add a")
+    real_git = mind.git
+
+    def fake_git(c, args, cwd, timeout):
+        if args[:1] == ["push"]:
+            return subprocess.CompletedProcess(
+                args=args, returncode=1, stdout="",
+                stderr="fatal: unable to access 'https://x-access-token:sekrit-token@example.test/o/r.git/'\n")
+        return real_git(c, args, cwd, timeout)
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    msg = mind.push(cfg)
+    assert "sekrit-token" not in msg
+    assert msg.endswith(": fatal: unable to access 'https://***@example.test/o/r.git/'")
+
+
 def test_token_goes_on_command_line_not_disk(repo):
     """A real git call with a token must neither expose it in argv (visible
     to `ps` on a shared cloud box) nor leave it written into .git/config."""

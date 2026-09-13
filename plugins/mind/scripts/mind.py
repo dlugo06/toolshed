@@ -402,14 +402,21 @@ def _ahead(cfg: Config) -> bool:
     return proc.returncode == 0 and proc.stdout.strip() not in ("", "0")
 
 
+_PUSH_FAILED_MSG = "mind: push failed, note is committed locally; it will push on the next remember or session start"
+
+
 def push(cfg: Config) -> str | None:
     args = ["push", "-q"] if _has_upstream(cfg) else ["push", "-q", "-u", "origin", "HEAD"]
     try:
         proc = git(cfg, args, cfg.home, GIT_TIMEOUTS["push"])
     except subprocess.TimeoutExpired:
-        return "mind: push failed, note is committed locally; it will push on the next remember or session start"
+        # No stderr is available for a timeout (the process is killed
+        # before it can report anything useful); the plain message stands.
+        return _PUSH_FAILED_MSG
     if proc.returncode != 0:
-        return "mind: push failed, note is committed locally; it will push on the next remember or session start"
+        lines = (proc.stderr or "").strip().splitlines()
+        last = lines[-1] if lines else "unknown error"
+        return f"{_PUSH_FAILED_MSG}: {_redact(last, cfg)}"
     return None
 
 
