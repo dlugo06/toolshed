@@ -1152,6 +1152,19 @@ def test_identity_helpers_find_config_from_a_linked_worktree(repo, tmp_path):
     assert mind._git_user_email(wcfg) == "owner@example.com"
 
 
+def test_ensure_checkout_accepts_linked_worktree_as_home(repo, tmp_path):
+    """A cloud session's attached data repo can be a linked worktree or
+    submodule, where `.git` is a FILE, not a directory (PR #11 review,
+    finding 4). ensure_checkout must accept this as a valid existing
+    checkout instead of rejecting it as "not a git checkout"."""
+    cfg, _, _ = repo
+    wt = tmp_path / "wt"
+    _git(["worktree", "add", "-q", "-b", "scratch3", "--", str(wt)], cfg.home)
+    wcfg = dataclasses.replace(cfg, home=wt)
+    assert (wt / ".git").is_file()   # sanity: a linked worktree, not a plain repo
+    assert mind.ensure_checkout(wcfg) is None
+
+
 def test_cmd_add_reports_push_failure_but_keeps_commit(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)

@@ -342,7 +342,11 @@ def _is_valid_git_dir(cfg: Config) -> bool:
 
 
 def ensure_checkout(cfg: Config) -> str | None:
-    if (cfg.home / ".git").is_dir():
+    # `.git` is a FILE, not a directory, inside a linked worktree or
+    # submodule (see _has_configured_identity); `.exists()` accepts both
+    # shapes and `_is_valid_git_dir`'s `rev-parse --git-dir` resolves either
+    # one correctly.
+    if (cfg.home / ".git").exists():
         if _has_head(cfg) or _is_valid_git_dir(cfg):
             return None
         # A clone the 30s timeout killed mid-transfer (or any other half
