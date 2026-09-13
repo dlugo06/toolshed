@@ -286,19 +286,36 @@ _CREDENTIAL_URL_RE = re.compile(r"://[^@/]+@")
 def _redact(text: str, cfg: Config | None = None) -> str:
     """Strip a userinfo-embedded credential (https://x-access-token:TOK@...,
     a natural alternative to MIND_TOKEN) from any git stderr or exception
-    text before it reaches stdout, plus the literal token value if known."""
+    text before it reaches stdout, plus the literal token value if known,
+    plus every other credential shape _mask_credential_shapes knows about
+    (doctor's `remote:` line and propose's worktree/push errors echo git/gh
+    stderr verbatim, which can carry a bare token string)."""
     text = _CREDENTIAL_URL_RE.sub("://***@", text)
     if cfg and cfg.token:
         text = text.replace(cfg.token, "***")
-    return text
+    return _mask_credential_shapes(text)
 
 
 _CREDENTIAL_SHAPE_RES = [
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"gh[oprsu]_[A-Za-z0-9]{20,}"),
     re.compile(r"ghp_[A-Za-z0-9]{36}"),
     re.compile(r"sk-ant-[A-Za-z0-9_-]+"),
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"AIza[0-9A-Za-z_-]{30,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"ASIA[0-9A-Z]{16}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
 ]
+
+# A 40-char base64-ish token (the shape of an AWS secret access key) is too
+# generic to mask everywhere -- only on a line that also names an AKIA
+# access key id or the literal "aws_secret" marker, since that pairing is
+# what an AWS credential block actually looks like.
+_AWS_SECRET_MARKER_RE = re.compile(r"AKIA|aws_secret")
+_AWS_SECRET_SHAPE_RE = re.compile(r"[A-Za-z0-9/+]{40}")
 
 
 def _mask_credential_shapes(text: str) -> str:
@@ -306,6 +323,13 @@ def _mask_credential_shapes(text: str) -> str:
     scrubbing it out of the pending file: mask the common credential shapes
     before writing, same URL pattern `_redact` uses for git/gh output."""
     text = _CREDENTIAL_URL_RE.sub("://***@", text)
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        # Before the AKIA-id pattern below runs: once that replaces the id
+        # with "***", the marker this line-scoped rule looks for is gone.
+        if _AWS_SECRET_MARKER_RE.search(line):
+            lines[i] = _AWS_SECRET_SHAPE_RE.sub("***", line)
+    text = "\n".join(lines)
     for pattern in _CREDENTIAL_SHAPE_RES:
         text = pattern.sub("***", text)
     return text

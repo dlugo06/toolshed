@@ -2493,6 +2493,69 @@ def test_capture_masks_credential_shapes_in_prompt(repo, tmp_path):
     assert "use this token *** to auth" == row["prompt"]
 
 
+def test_mask_credential_shapes_covers_todays_common_prefixes():
+    """SEC-H1/PR-5: the credential shape list covered only ghp_ (fixed 36
+    chars), sk-ant-, AKIA, PEM, and userinfo URLs -- it missed today's
+    common shapes, which were written to pending.jsonl verbatim and could
+    reach a public PR body via /mind:digest -> propose. One shape each."""
+    cases = {
+        "a GitHub fine-grained PAT": "github_pat_" + "a" * 30,
+        "a GitHub OAuth token": "gho_" + "b" * 30,
+        "a GitHub user-to-server token": "ghu_" + "c" * 30,
+        "a bare sk- shaped secret key": "sk-" + "d" * 30,
+        "a Slack bot token": "xoxb-" + "1234567890abc",
+        "a Google API key": "AIza" + "e" * 35,
+        "an AWS STS temporary access key id": "ASIA" + "F" * 16,
+        "a JWT": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dQw4w9WgXcQ_abcdefghij",
+    }
+    for label, token in cases.items():
+        masked = mind._mask_credential_shapes(f"here is the token: {token} end")
+        assert token not in masked, f"{label} not masked: {token}"
+
+
+def test_mask_credential_shapes_masks_40_char_secret_next_to_akia_marker():
+    """SEC-H1: the 40-char AWS secret key normally pasted next to the AKIA
+    access key id it accompanies must be masked too -- previously only the
+    AKIA id itself was."""
+    secret = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEYx1"
+    assert len(secret) == 40
+    line = f"AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE AWS_SECRET_ACCESS_KEY={secret}"
+    masked = mind._mask_credential_shapes(line)
+    assert secret not in masked
+    assert "AKIAIOSFODNN7EXAMPLE" not in masked
+
+
+def test_mask_credential_shapes_masks_40_char_secret_next_to_aws_secret_marker():
+    """SEC-H1: the same 40-char rule fires off the literal "aws_secret"
+    marker too, not only "AKIA"."""
+    secret = "a" * 40
+    line = f"aws_secret_access_key: {secret}"
+    masked = mind._mask_credential_shapes(line)
+    assert secret not in masked
+
+
+def test_redact_applies_credential_shape_masking(repo):
+    """SEC-M2: _redact skipped shape masking entirely, applying only the
+    userinfo-URL pattern -- doctor's remote: line and propose's worktree/
+    push errors echo git/gh stderr, which can carry a bare token string."""
+    cfg, _, _ = repo
+    token = "ghp_" + "a" * 36
+    redacted = mind._redact(f"remote: unauthorized, token {token} rejected", cfg)
+    assert token not in redacted
+
+
+def test_doctor_remote_line_masks_ghp_token_in_stderr(repo, monkeypatch):
+    """SEC-M2 pinned test: doctor's remote: line with a ghp_ token in
+    stderr is masked."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    token = "ghp_" + "a" * 36
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (False, f"fatal: bad credentials {token}"))
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    out = mind.cmd_doctor(cfg)
+    assert token not in out
+
+
 def test_capture_skips_slash_and_short_and_is_inert_without_repo(repo, tmp_path):
     cfg, _, _ = repo
     env = dict(os.environ, MIND_REPO=cfg.repo, MIND_HOME=str(cfg.home), CLAUDE_PLUGIN_ROOT=str(PLUGIN))
