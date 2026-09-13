@@ -2889,9 +2889,27 @@ def test_doctor_lines(repo, tmp_path, monkeypatch):
     assert out[4] == "identity: doctor@example.test"
     assert out[5] == "gh: 2.0.0 authenticated"
     assert out[6] == "pending: 0 lines, 0 unprocessed, watermark none"
-    assert out[7] == "settings: auto_answer=true escalate=false"
-    assert out[8] == "notes: 0 accepted, 0 drafts, 0 malformed, 0 projects"
+    assert out[7] == "capture: never"
+    assert out[8] == "settings: auto_answer=true escalate=false"
+    assert out[9] == "notes: 0 accepted, 0 drafts, 0 malformed, 0 projects"
     assert "sekrit" not in "\n".join(out)
+
+
+def test_doctor_reports_capture_last_write_from_newest_pending_row(repo, monkeypatch):
+    """SF9: capture is double-silenced (capture.sh redirects to /dev/null,
+    cmd_capture swallows every exception) with no health signal anywhere;
+    doctor must report the newest captured ts and the line count, so an
+    unwritable MIND_PENDING or a full disk doesn't mine nothing forever
+    while `pending: 0 lines` reads as normal."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    pending = cfg.home.parent / "pending.jsonl"
+    pending.write_text('{"ts": "2026-09-12T09:00:00Z", "prompt": "one"}\n'
+                        '{"ts": "2026-09-12T11:00:00Z", "prompt": "two"}\n')
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
+    out = mind.cmd_doctor(cfg).splitlines()
+    assert out[7] == "capture: last write 2026-09-12T11:00:00Z (2 lines)"
 
 
 def test_doctor_upstream_checks_main_specifically_not_current_head(repo, monkeypatch):
@@ -2932,7 +2950,7 @@ def test_doctor_missing_checkout_never_clones(tmp_path, monkeypatch):
     out = mind.cmd_doctor(cfg).splitlines()
     assert not cfg.home.exists()
     assert out[1] == "checkout: missing"
-    assert out[8] == "notes: 0 accepted, 0 drafts, 0 malformed, 0 projects"
+    assert out[9] == "notes: 0 accepted, 0 drafts, 0 malformed, 0 projects"
 
 
 def test_doctor_reports_broken_not_a_git_dir(tmp_path, monkeypatch):
@@ -2971,4 +2989,4 @@ def test_doctor_without_mind_repo_reports_unset_and_continues(tmp_path, monkeypa
     assert out[0].startswith("config: MIND_REPO=unset MIND_HOME=")
     assert out[1] == "checkout: missing"
     assert out[3] == "remote: unreachable (MIND_REPO not set)"
-    assert out[8] == "notes: 0 accepted, 0 drafts, 0 malformed, 0 projects"
+    assert out[9] == "notes: 0 accepted, 0 drafts, 0 malformed, 0 projects"

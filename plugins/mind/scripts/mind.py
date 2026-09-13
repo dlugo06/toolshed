@@ -1393,6 +1393,28 @@ def _git_user_email(cfg: Config) -> str | None:
     return value if proc.returncode == 0 and value else None
 
 
+def _capture_health(pending_path: Path) -> str:
+    """SF9: capture is double-silenced (capture.sh redirects to
+    /dev/null, cmd_capture swallows every exception), so an unwritable
+    MIND_PENDING or a full disk mines nothing forever while `pending: 0
+    lines` reads as healthy. Report the newest captured row's ts and the
+    line count as a health signal doctor can show instead."""
+    if not pending_path.exists():
+        return "capture: never"
+    lines = pending_path.read_text(encoding="utf-8").splitlines()
+    newest = None
+    for line in lines:
+        try:
+            ts = json.loads(line).get("ts")
+        except json.JSONDecodeError:
+            continue
+        if ts and (newest is None or ts > newest):
+            newest = ts
+    if newest is None:
+        return "capture: never"
+    return f"capture: last write {newest} ({len(lines)} lines)"
+
+
 def cmd_doctor(cfg: Config) -> str:
     lines: list[str] = []
     repo_display = cfg.repo if cfg.repo else "unset"
@@ -1425,6 +1447,7 @@ def cmd_doctor(cfg: Config) -> str:
     wm_path = _watermark_file(cfg)
     watermark = wm_path.read_text(encoding="utf-8").strip() if wm_path.exists() else "none"
     lines.append(f"pending: {total} lines, {unprocessed} unprocessed, watermark {watermark}")
+    lines.append(_capture_health(pending_path))
     settings, settings_error = load_settings(cfg)
     lines.append(f"settings: auto_answer={str(settings['auto_answer']).lower()} escalate={str(settings['escalate']).lower()}")
     if settings_error:
