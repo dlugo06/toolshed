@@ -637,19 +637,49 @@ def test_ensure_checkout_removes_partial_dir_on_clone_failure(tmp_path, monkeypa
 
 
 def test_ensure_checkout_reports_failure_for_nonempty_home_without_git(repo):
-    """A crashed clone can leave a non-empty directory with no .git/: against
-    a perfectly valid source, git clone still refuses to clone into a
-    non-empty destination, and ensure_checkout must report that failure
-    rather than raising or leaving the target half-populated."""
+    """A pre-existing non-empty directory at MIND_HOME (a crashed clone's
+    leftovers, or a directory the owner pointed MIND_HOME at by mistake)
+    must never be touched: ensure_checkout must never remove or write into
+    a directory it did not create, and must report this case directly
+    rather than letting git's own "destination already exists" error
+    through."""
     cfg, bare, _ = repo
     home = cfg.home.parent / "nonempty_home"
     home.mkdir(parents=True)
     (home / "stray.txt").write_text("leftover\n")
     cfg2 = dataclasses.replace(cfg, home=home)
     msg = mind.ensure_checkout(cfg2)
-    assert msg.startswith("mind: clone failed")
+    assert msg == f"mind: {home} exists and is not a git checkout; set MIND_HOME to a clone or an empty path"
     assert not (home / ".git").exists()
     assert (home / "stray.txt").is_file()  # left untouched, not half-populated
+
+
+def test_ensure_checkout_never_clones_when_home_pre_exists_nonempty(repo, monkeypatch):
+    """The safety check above must short-circuit before any git call: a
+    pre-existing non-empty MIND_HOME must never even attempt a clone."""
+    cfg, bare, _ = repo
+    home = cfg.home.parent / "nonempty_home2"
+    home.mkdir(parents=True)
+    (home / "stray.txt").write_text("leftover\n")
+    cfg2 = dataclasses.replace(cfg, home=home)
+
+    def fake_git(c, args, cwd, timeout):
+        raise AssertionError(f"unexpected git call: {args}")
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    msg = mind.ensure_checkout(cfg2)
+    assert msg == f"mind: {home} exists and is not a git checkout; set MIND_HOME to a clone or an empty path"
+
+
+def test_ensure_checkout_never_deletes_pre_existing_empty_home_on_clone_failure(tmp_path):
+    """A pre-existing (even empty) MIND_HOME directory must survive a failed
+    clone: ensure_checkout only deletes a directory it created itself."""
+    home = tmp_path / "h"
+    home.mkdir(parents=True)
+    cfg = mind.Config.from_env({"MIND_REPO": str(tmp_path / "missing.git"), "MIND_HOME": str(home)}, tmp_path)
+    msg = mind.ensure_checkout(cfg)
+    assert msg.startswith("mind: clone failed")
+    assert home.is_dir()  # pre-existing directory, never removed
 
 
 def _write_project(cfg, slug, aliases=(), stack=("go", "postgres"), body="Backend API service. Second sentence."):
@@ -3046,6 +3076,9 @@ def test_doctor_lines(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)
     _git(["config", "user.email", "doctor@example.test"], cfg.home)
+    # origin is set to the same (fake, credentialed) URL as MIND_REPO below,
+    # so this exercises the reachability line, not the origin-mismatch line.
+    _git(["remote", "set-url", "origin", "https://x-access-token:sekrit@example.test/o/r.git"], cfg.home)
     cfg = dataclasses.replace(cfg, repo="https://x-access-token:sekrit@example.test/o/r.git", token="sekrit")
     monkeypatch.setattr(mind, "_gh", lambda c, a, w, timeout=20: subprocess.CompletedProcess(a, 0, "gh version 2.0.0\n", "Logged in"))
     monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
@@ -3090,6 +3123,40 @@ def test_doctor_upstream_checks_main_specifically_not_current_head(repo, monkeyp
     monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
     out = mind.cmd_doctor(cfg).splitlines()
     assert out[2] == "upstream: main tracks origin/main"
+
+
+def test_doctor_reports_remote_mismatch_when_origin_differs_from_mind_repo(repo, monkeypatch):
+    """When the checkout's origin was cloned from one repo but MIND_REPO now
+    points somewhere else (a copy-pasted config, a rotated data repo URL),
+    doctor must say so plainly instead of reporting reachability against a
+    repo the checkout doesn't actually use."""
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+
+    def unexpected(c):
+        raise AssertionError("_remote_reachable must not run when origin mismatches MIND_REPO")
+
+    monkeypatch.setattr(mind, "_remote_reachable", unexpected)
+    mismatched_repo = str(bare) + "-other"
+    cfg2 = dataclasses.replace(cfg, repo=mismatched_repo)
+    out = mind.cmd_doctor(cfg2).splitlines()
+    assert out[3] == f"remote: origin {bare} does not match MIND_REPO"
+
+
+def test_doctor_remote_line_ignores_trailing_dotgit_and_userinfo_when_comparing(repo, monkeypatch):
+    """The origin/MIND_REPO comparison must not flag a false mismatch over a
+    trailing `.git` or an embedded `user@` credential -- both are
+    cosmetic differences in the same repo, not a different remote."""
+    cfg, bare, _ = repo
+    mind.cmd_init(cfg)
+    bare_no_git = str(bare)[: -len(".git")]  # `repo` fixture's bare dir is named "remote.git"
+    _git(["remote", "set-url", "origin", f"https://x-access-token:tok@example.test{bare}"], cfg.home)
+    monkeypatch.setattr(mind, "_gh", lambda *a, **k: None)
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
+    cfg2 = dataclasses.replace(cfg, repo=f"https://example.test{bare_no_git}")
+    out = mind.cmd_doctor(cfg2).splitlines()
+    assert out[3] == "remote: reachable (12 ms)"
 
 
 def test_remote_reachable_reports_missing_checkout_directory(tmp_path):

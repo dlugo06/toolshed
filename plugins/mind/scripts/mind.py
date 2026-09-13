@@ -350,15 +350,23 @@ def ensure_checkout(cfg: Config) -> str | None:
         # Every later run would otherwise report "offline" forever and
         # inject an empty index that reads as "you have no notes".
         return f"mind: checkout at {cfg.home} is broken, delete it and rerun"
+    # A directory this call did not create must never be removed or written
+    # into: a pre-existing non-empty (or non-directory) MIND_HOME -- a
+    # crashed clone's leftovers, or the owner pointing MIND_HOME at the
+    # wrong path -- is reported directly, before any git call, rather than
+    # falling through to git clone's own "destination already exists" error.
+    existed_before = cfg.home.exists()
+    if existed_before and (not cfg.home.is_dir() or any(cfg.home.iterdir())):
+        return f"mind: {cfg.home} exists and is not a git checkout; set MIND_HOME to a clone or an empty path"
     cfg.home.parent.mkdir(parents=True, exist_ok=True)
     try:
         proc = git(cfg, ["clone", "-q", "--", cfg.repo, str(cfg.home)], cfg.home.parent, GIT_TIMEOUTS["clone"])
     except subprocess.TimeoutExpired:
-        if (cfg.home / ".git").exists():
+        if not existed_before and (cfg.home / ".git").exists():
             shutil.rmtree(cfg.home, ignore_errors=True)
         return "mind: clone failed, timed out"
     if proc.returncode != 0:
-        if (cfg.home / ".git").exists():
+        if not existed_before and (cfg.home / ".git").exists():
             shutil.rmtree(cfg.home, ignore_errors=True)
         stderr = proc.stderr.strip()
         msg = ("mind: clone failed, " + stderr.splitlines()[-1]) if stderr else "mind: clone failed"
@@ -1406,6 +1414,24 @@ def _checkout_state(cfg: Config) -> str:
     return "ok"
 
 
+_USERINFO_RE = re.compile(r"://[^/@]+@")
+
+
+def _normalize_repo_url(url: str) -> str:
+    """For comparing a checkout's `origin` against MIND_REPO: strip a
+    userinfo credential (`://user@`) and a single trailing `.git`, both
+    cosmetic differences that must never read as a different remote."""
+    url = _USERINFO_RE.sub("://", url.strip())
+    return url[:-len(".git")] if url.endswith(".git") else url
+
+
+def _origin_url(cfg: Config) -> str | None:
+    proc = git(cfg, ["remote", "get-url", "origin"], cfg.home, 5)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
 def _remote_reachable(cfg: Config) -> tuple[bool, int | str]:
     """`git ls-remote` against cfg.repo directly (not the "origin" remote
     name), so this works even when cfg.home was never cloned."""
@@ -1473,8 +1499,16 @@ def cmd_doctor(cfg: Config) -> str:
         # probe, but still report every other line that needs no repo.
         lines.append("remote: unreachable (MIND_REPO not set)")
     else:
-        reachable, info = _remote_reachable(cfg)
-        lines.append(f"remote: reachable ({info} ms)" if reachable else f"remote: unreachable ({_redact(str(info), cfg)})")
+        origin = _origin_url(cfg) if state == "ok" else None
+        if origin is not None and _normalize_repo_url(origin) != _normalize_repo_url(cfg.repo):
+            # A checkout cloned from one repo with MIND_REPO now pointing
+            # elsewhere (a copy-pasted config, a rotated data repo URL):
+            # reachability against MIND_REPO would be beside the point --
+            # this checkout doesn't pull from or push to it at all.
+            lines.append(f"remote: origin {origin} does not match MIND_REPO")
+        else:
+            reachable, info = _remote_reachable(cfg)
+            lines.append(f"remote: reachable ({info} ms)" if reachable else f"remote: unreachable ({_redact(str(info), cfg)})")
     email = _git_user_email(cfg)
     lines.append(f"identity: {email or 'none, will use mind@localhost'}")
     version_proc = _gh(cfg, ["--version"], cfg.home)
