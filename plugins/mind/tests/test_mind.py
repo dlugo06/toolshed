@@ -1788,6 +1788,51 @@ def test_gh_disables_prompts_via_env(repo, monkeypatch):
     assert captured["env"].get("GH_PROMPT_DISABLED") == "1"
 
 
+def test_gh_timeout_returns_completed_process_not_none(repo, monkeypatch):
+    """SF10: _gh conflated missing, timed out, and unauthenticated by
+    returning None for all three -- doctor then printed "present, not
+    authenticated" on a mere timeout, and propose said "open the PR by
+    hand" without saying why. A timeout must be distinguishable from
+    "gh not installed"."""
+    cfg, _, _ = repo
+    monkeypatch.setattr(mind.shutil, "which", lambda name: "/usr/bin/gh")
+
+    def fake_run(args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(mind.subprocess, "run", fake_run)
+    proc = mind._gh(cfg, ["auth", "status"], cfg.home)
+    assert proc is not None
+    assert proc.returncode == 124
+    assert proc.stderr == "timed out"
+
+
+def test_gh_returns_none_only_when_gh_is_missing(repo, monkeypatch):
+    cfg, _, _ = repo
+    monkeypatch.setattr(mind.shutil, "which", lambda name: None)
+    assert mind._gh(cfg, ["--version"], cfg.home) is None
+
+
+def test_doctor_reports_gh_present_timed_out_on_auth_status_timeout(repo, monkeypatch):
+    """SF10: doctor previously printed "present, not authenticated" on a
+    mere `gh auth status` timeout, indistinguishable from a real auth
+    failure."""
+    cfg, _, _ = repo
+    mind.cmd_init(cfg)
+    monkeypatch.setattr(mind, "_remote_reachable", lambda c: (True, 12))
+
+    def fake_gh(c, args, cwd, timeout=20):
+        if args == ["--version"]:
+            return subprocess.CompletedProcess(args, 0, "gh version 2.0.0\n", "")
+        if args == ["auth", "status"]:
+            return subprocess.CompletedProcess(args, 124, "", "timed out")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(mind, "_gh", fake_gh)
+    out = mind.cmd_doctor(cfg).splitlines()
+    assert out[5] == "gh: 2.0.0 present, timed out"
+
+
 def test_cmd_propose_without_gh(repo, tmp_path, monkeypatch):
     cfg, _, _ = repo
     mind.cmd_init(cfg)

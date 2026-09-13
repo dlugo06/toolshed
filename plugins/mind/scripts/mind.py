@@ -771,7 +771,11 @@ def cmd_accept(cfg: Config, note_id: str) -> str:
 
 
 def _gh(cfg: Config, args: list[str], cwd: Path, timeout: float = 20) -> subprocess.CompletedProcess | None:
-    """gh, never through a shell. None when gh is not installed."""
+    """gh, never through a shell. None only when gh is not installed (or
+    OSError'd trying to run it); a timeout returns a CompletedProcess with
+    returncode 124 and stderr "timed out" instead of None, so a caller (and
+    doctor) can tell "hung" apart from "missing" and from "present but
+    genuinely erroring", which None used to conflate."""
     if shutil.which("gh") is None:
         return None
     env = {k: v for k, v in cfg.env.items() if k != "MIND_TOKEN"}
@@ -780,7 +784,9 @@ def _gh(cfg: Config, args: list[str], cwd: Path, timeout: float = 20) -> subproc
     env["GH_PROMPT_DISABLED"] = "1"
     try:
         return subprocess.run(["gh", *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
-    except (subprocess.TimeoutExpired, OSError):
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(["gh", *args], 124, "", "timed out")
+    except OSError:
         return None
 
 
@@ -1436,10 +1442,17 @@ def cmd_doctor(cfg: Config) -> str:
     version_proc = _gh(cfg, ["--version"], cfg.home)
     if version_proc is None:
         lines.append("gh: missing")
+    elif version_proc.returncode == 124:
+        lines.append("gh: present, timed out")
     else:
         m = re.search(r"gh version (\S+)", version_proc.stdout or "")
         auth_proc = _gh(cfg, ["auth", "status"], cfg.home)
-        status = "authenticated" if auth_proc is not None and auth_proc.returncode == 0 else "present, not authenticated"
+        if auth_proc is not None and auth_proc.returncode == 0:
+            status = "authenticated"
+        elif auth_proc is not None and auth_proc.returncode == 124:
+            status = "present, timed out"
+        else:
+            status = "present, not authenticated"
         lines.append(f"gh: {m.group(1) if m else 'unknown'} {status}")
     pending_path = PENDING_FILE(cfg)
     total = len(pending_path.read_text(encoding="utf-8").splitlines()) if pending_path.exists() else 0
