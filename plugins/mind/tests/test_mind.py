@@ -57,7 +57,10 @@ def test_hook_does_not_block_on_a_tty_stdin(tmp_path):
         )
         os.close(follower_fd)
         try:
-            proc.communicate(timeout=5)
+            # PR-minor: 5s was observed flaky under load in a ~112s full-suite
+            # run; 15s gives headroom without meaningfully slowing a genuine
+            # hang's failure.
+            proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
