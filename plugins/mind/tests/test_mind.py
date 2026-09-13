@@ -671,15 +671,51 @@ def test_ensure_checkout_never_clones_when_home_pre_exists_nonempty(repo, monkey
     assert msg == f"mind: {home} exists and is not a git checkout; set MIND_HOME to a clone or an empty path"
 
 
-def test_ensure_checkout_never_deletes_pre_existing_empty_home_on_clone_failure(tmp_path):
+def test_ensure_checkout_clears_pre_existing_empty_home_on_clone_timeout(tmp_path, monkeypatch):
     """A pre-existing (even empty) MIND_HOME directory must survive a failed
-    clone: ensure_checkout only deletes a directory it created itself."""
+    clone: ensure_checkout only deletes a directory it created itself. But
+    a killed clone's partial `.git` and other junk must still be cleared
+    out of it -- git itself cannot clean up after its own SIGKILL, and a
+    real clone into a missing repo fails before writing anything, so it
+    never exercises this path (PR #11 review, finding 1); fake git so the
+    partial write actually happens first."""
     home = tmp_path / "h"
     home.mkdir(parents=True)
-    cfg = mind.Config.from_env({"MIND_REPO": str(tmp_path / "missing.git"), "MIND_HOME": str(home)}, tmp_path)
+    cfg = mind.Config.from_env({"MIND_REPO": "/irrelevant", "MIND_HOME": str(home)}, tmp_path)
+
+    def fake_git(c, args, cwd, timeout):
+        if args and args[0] == "clone":
+            (c.home / ".git").mkdir(parents=True)  # what a killed clone leaves behind
+            (c.home / "partial.txt").write_text("junk")
+            raise subprocess.TimeoutExpired(cmd="git clone", timeout=timeout)
+        raise AssertionError(f"unexpected git call: {args}")
+
+    monkeypatch.setattr(mind, "git", fake_git)
     msg = mind.ensure_checkout(cfg)
-    assert msg.startswith("mind: clone failed")
+    assert msg == "mind: clone failed, timed out"
     assert home.is_dir()  # pre-existing directory, never removed
+    assert list(home.iterdir()) == []  # but its clone junk is cleared
+
+
+def test_ensure_checkout_clears_pre_existing_empty_home_on_clone_failure(tmp_path, monkeypatch):
+    """Same as the timeout case above, but for a clone that fails outright
+    (non-zero exit) instead of timing out."""
+    home = tmp_path / "h"
+    home.mkdir(parents=True)
+    cfg = mind.Config.from_env({"MIND_REPO": "/irrelevant", "MIND_HOME": str(home)}, tmp_path)
+
+    def fake_git(c, args, cwd, timeout):
+        if args and args[0] == "clone":
+            (c.home / ".git").mkdir(parents=True)
+            (c.home / "partial.txt").write_text("junk")
+            return subprocess.CompletedProcess(args=args, returncode=128, stdout="", stderr="fatal: boom\n")
+        raise AssertionError(f"unexpected git call: {args}")
+
+    monkeypatch.setattr(mind, "git", fake_git)
+    msg = mind.ensure_checkout(cfg)
+    assert msg == "mind: clone failed, fatal: boom"
+    assert home.is_dir()  # pre-existing directory, never removed
+    assert list(home.iterdir()) == []  # but its clone junk is cleared
 
 
 def _write_project(cfg, slug, aliases=(), stack=("go", "postgres"), body="Backend API service. Second sentence."):

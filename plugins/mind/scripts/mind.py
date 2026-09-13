@@ -362,16 +362,41 @@ def ensure_checkout(cfg: Config) -> str | None:
     try:
         proc = git(cfg, ["clone", "-q", "--", cfg.repo, str(cfg.home)], cfg.home.parent, GIT_TIMEOUTS["clone"])
     except subprocess.TimeoutExpired:
-        if not existed_before and (cfg.home / ".git").exists():
-            shutil.rmtree(cfg.home, ignore_errors=True)
+        _cleanup_after_failed_clone(cfg, existed_before)
         return "mind: clone failed, timed out"
     if proc.returncode != 0:
-        if not existed_before and (cfg.home / ".git").exists():
-            shutil.rmtree(cfg.home, ignore_errors=True)
+        _cleanup_after_failed_clone(cfg, existed_before)
         stderr = proc.stderr.strip()
         msg = ("mind: clone failed, " + stderr.splitlines()[-1]) if stderr else "mind: clone failed"
         return _redact(msg, cfg)
     return None
+
+
+def _clear_directory(path: Path) -> None:
+    """Remove every entry under path, leaving path itself in place."""
+    for child in path.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+
+
+def _cleanup_after_failed_clone(cfg: Config, existed_before: bool) -> None:
+    """`git()` SIGKILLs the whole process group on timeout (see `git`), so
+    a killed or otherwise failed clone can leave a partial `.git` (or other
+    junk) behind that git itself never gets to clean up. A directory this
+    call created (existed_before is False) is removed entirely; a
+    pre-existing MIND_HOME -- already confirmed empty by the guard above --
+    is emptied back out instead, since ensure_checkout must never remove a
+    path it did not create. Leaving it non-empty here would misreport as
+    "not a git checkout" on the very next run, with mind's own leftovers as
+    the cause."""
+    if not cfg.home.exists():
+        return
+    if existed_before:
+        _clear_directory(cfg.home)
+    else:
+        shutil.rmtree(cfg.home, ignore_errors=True)
 
 
 def pull(cfg: Config) -> str | None:
