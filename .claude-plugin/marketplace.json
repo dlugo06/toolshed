@@ -27,7 +27,7 @@
       "name": "orchestrator",
       "source": "orchestrator",
       "description": "Cross-project work router: reads every project's PRD items, assigns each a pipeline stage, runs the single next transition, stops at human gates",
-      "version": "1.4.0",
+      "version": "1.4.1",
       "author": {
         "name": "dlugo06",
         "url": "https://github.com/dlugo06"
@@ -40,7 +40,7 @@
       "name": "mind",
       "source": "mind",
       "description": "Owner preference and decision store: a private notes repo pulled and injected at session start, remember and ask skills, proposals as pull requests, passive capture with digest, review and lint.",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "author": {
         "name": "dlugo06",
         "url": "https://github.com/dlugo06"
