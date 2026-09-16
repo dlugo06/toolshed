@@ -26,8 +26,8 @@
     {
       "name": "orchestrator",
       "source": "orchestrator",
-      "description": "Cross-project work router: reads every project's PRD items, assigns each a pipeline stage, runs the single next transition, stops at human gates",
-      "version": "1.4.0",
+      "description": "Cross-project work router: reads every project's PRD items, assigns each a pipeline stage, runs the single next transition, stops at human gates; a release skill audits and batches the PRs waiting at the merge gate",
+      "version": "1.5.0",
       "author": {
         "name": "dlugo06",
         "url": "https://github.com/dlugo06"

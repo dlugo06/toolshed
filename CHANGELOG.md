@@ -1,5 +1,11 @@
 # Changelog
 
+## orchestrator 1.5.0 (2026-09-16)
+
+- **`/orchestrator:release`**: the merge gate's preparation for the PRs autonomous runs leave open. New skill `skills/release/SKILL.md` and reference `reference/release.md` (stage-audit evidence table, fresh verification in scratch worktrees plus one integration branch per batch, conflict resolutions for the append-only docs, batching rules: docs first, one deploy surface per batch, owner-gated PRs alone and last, rollups merged with a merge commit never a squash; the manual-check checklist sourced from `steps_to_verify`, the PR bodies' open boxes and the named Sentry issues; the `.dev/PR_ROLLOUT_<date>.md` section order and the report shape). New script `scripts/release.py`: `prs --project-dir <dir>` joins each open PR with its PRD item, tier, deploy surfaces, on-disk pipeline artifacts, the decision table's rejected rows, the owner steps parsed from the PR body, pairwise file overlaps (code vs append-only docs) and a first-cut batch split; `proposals --repo <mind checkout> --since <date>` audits every merged `propose/*` PR on the mind data repo into proposed / kept / dropped / edited note IDs from the branch's commits and lists the open proposals. Tests in `tests/test_release.py`.
+- Reference §Consult the mind: the drafting rule for provisional rulings now applies the owner's identity test (PRIN-ID-001) and names the five classes the owner dropped from proposal PRs #4-#14 (item rulings, run mechanics, the agent's own corrections, code placement, library traps); those go to the progress line, the register or the docs, never to a proposal. The `release` skill re-derives the classes from each merge and grows the list when a new one appears.
+- READMEs: root and orchestrator updated for the skill, the script and the new environment note (`MIND_HOME` is read by `release.py proposals`).
+
 ## mind 0.2.1 (2026-09-13)
 
 - **Safety**: `ensure_checkout` no longer removes a directory it did not create. It only deletes `MIND_HOME` after a failed or timed-out clone when that path did not exist before the clone started; a pre-existing non-empty (or non-directory) `MIND_HOME` is reported directly as `mind: <home> exists and is not a git checkout; set MIND_HOME to a clone or an empty path`, before any git call, rather than falling through to git clone's own "destination already exists" error.

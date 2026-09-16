@@ -25,12 +25,17 @@ Optional: install the [`gh` CLI](https://cli.github.com) and authenticate it. Wh
 | `/orchestrator:triage` | propose keep / fold / defer / drop for every open item in one project; the owner confirms before anything is written to the phase files |
 | `/orchestrator:next` | select one unit across all projects and run its next transition |
 | `/orchestrator:advance <project>/<id>` | run the next transition for one named item; `advance "<intent>"` files a new item and specs it |
+| `/orchestrator:release` | release coordinator for the merge gate: audits every open PR a run produced against the tier table, verifies the suites fresh, builds one integration branch per batch, writes the owner's manual checks to `.dev/PR_ROLLOUT_<date>.md`, opens the rollup PRs, and audits what the owner kept of the mind's merged proposals |
 
 The SessionStart hook prints what is in flight so a fresh session starts with the next action on screen.
 
 ## Consult the mind
 
 When the `mind` plugin is installed side by side, every ruling the orchestrator makes on the owner's behalf follows **decide, cite, or propose**: before deciding, it runs `mind.py ask <terms>` (the stage consult table is in `reference/orchestrator.md`, §Consult the mind); a settling note is applied and cited `[per <ID>]`, otherwise the ruling is applied anyway and marked `[provisional]`. At the end of a transition, every provisional ruling is drafted as a note and delivered in one pull request on the data repo via `mind.py propose`; the PR URL goes on the progress line and in the report. An owner statement made during the run goes through `mind.py add` immediately. A ruling that would change a `must` note's effect is never provisional — the note is applied, or the orchestrator records `blocked_reason` and stops. Without the `mind` plugin, every consult is skipped and the report says `Mind: not installed`; nothing else changes. The report gains two lines: `Mind: consulted <IDs or none | not installed>` and `Proposals: <PR url or none>`.
+
+## Release
+
+`/orchestrator:release` runs when the owner is ready to merge what the autonomous runs left at `review_processed`. `scripts/release.py prs --project-dir <dir>` joins each open PR with its PRD item and tier, the deploy surfaces it touches (`bridge`, `config`, `docs`, `python`), the pipeline artifacts on disk (spec, plan, impact report, test plan, whole-branch review, PR review reports), the decision table's rejected rows, the owner steps its body asks for, pairwise file overlaps (code vs append-only docs) and a first-cut batch split. The skill audits every stage from that evidence, never from the recorded `stage` field, re-runs the suites per PR in a scratch worktree and once per integration branch (`test/batch-<letter>-<date>`), batches by deploy surface with owner-gated PRs alone and last, and writes the manual checks from `steps_to_verify`, the PR bodies' open boxes and the Sentry issues the items name. Rollup PRs merge with a merge commit, never a squash. `scripts/release.py proposals --repo "$MIND_HOME" --since <date>` reports which notes the owner kept, dropped or edited in each merged `propose/*` PR on the mind data repo; the skill classifies every drop (`reference/release.md` §Proposal audit) and grows the drafting rule in `reference/orchestrator.md` when a new class appears. The checklists, batching rules and the report's section order are in `reference/release.md`.
 
 ## State
 
