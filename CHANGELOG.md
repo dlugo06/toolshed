@@ -1,5 +1,11 @@
 # Changelog
 
+## mind 0.2.2, orchestrator 1.4.1 (2026-09-16)
+
+- **What belongs in the mind** (owner rule PRIN-ID-001): `mind/templates/schema.md` gains a §What belongs section — a note is a position the owner would state on their own; what an agent learned doing the work is not one. Before proposing, ask whether the owner could have said it before the item existed, without knowing the codebase, the library or the run; library traps, run-environment mechanics, one-off item rankings and an agent's own corrections fail and go to the project's own docs instead.
+- **orchestrator reference §Consult the mind**: "every provisional ruling becomes a note" is replaced by that test; only rulings that pass are drafted and proposed. Motivating case: one window run proposed six notes, the owner kept two.
+- Root, orchestrator and mind READMEs updated; no code path with tests changed.
+
 ## mind 0.2.1 (2026-09-13)
 
 - **Safety**: `ensure_checkout` no longer removes a directory it did not create. It only deletes `MIND_HOME` after a failed or timed-out clone when that path did not exist before the clone started; a pre-existing non-empty (or non-directory) `MIND_HOME` is reported directly as `mind: <home> exists and is not a git checkout; set MIND_HOME to a clone or an empty path`, before any git call, rather than falling through to git clone's own "destination already exists" error.
