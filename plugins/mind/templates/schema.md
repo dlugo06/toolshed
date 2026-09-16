@@ -47,6 +47,17 @@ Required fields on `add`: `title`, `type`, `stage`, `strength`. Defaults:
 `status: accepted`, `affirmed: today`, `scope` from the `--scope` flag,
 `source: session <date>, <slug>`. The script rejects unknown enum values.
 
+## What belongs
+
+A note is a position the owner would state on their own; what an agent learned
+doing the work is not one. Before proposing, ask whether the owner could have
+said it before the item existed, without knowing the codebase, the library or
+the run. A stance on how software should be built passes. A fact that only
+makes sense with the item, the library or the environment in front of you
+fails, and so does any correction the agent made to its own work; that is
+project memory and goes to the behaviour register, a code comment, the docs
+or the PR body instead.
+
 ## Writing rules
 
 - One claim per note. The title is the claim, stated plainly.
